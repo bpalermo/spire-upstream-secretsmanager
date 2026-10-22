@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "testpki",
+    testonly = True,
+    srcs = ["testpki.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/internal/testpki",
+    visibility = ["//:__subpackages__"],
+)

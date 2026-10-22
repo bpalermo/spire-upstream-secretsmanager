@@ -40,7 +40,40 @@ go_sdk.nogo(nogo = "//:nogo")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-use_repo(go_deps, "co_honnef_go_tools", "com_github_uudashr_gocognit", "org_golang_x_tools")
+
+# The SPIRE plugin SDK checks in its generated Go next to the .proto sources;
+# with proto generation on, Gazelle would make go_proto_library targets for
+# them that do not resolve. Use the checked-in .pb.go instead.
+go_deps.gazelle_override(
+    build_file_generation = "clean",
+    directives = ["gazelle:proto disable_global"],
+    path = "github.com/spiffe/spire-plugin-sdk",
+)
+use_repo(go_deps, "co_honnef_go_tools", "com_github_aws_aws_sdk_go_v2", "com_github_aws_aws_sdk_go_v2_config", "com_github_aws_aws_sdk_go_v2_credentials", "com_github_aws_aws_sdk_go_v2_service_secretsmanager", "com_github_aws_aws_sdk_go_v2_service_sts", "com_github_hashicorp_go_hclog", "com_github_hashicorp_hcl", "com_github_spiffe_go_spiffe_v2", "com_github_spiffe_spire_plugin_sdk", "com_github_uudashr_gocognit", "org_golang_google_grpc")
 
 # The plugin image holds the binary and nothing else, so there is no base
 # image to pin (//bazel/image:defs.bzl, base = None).
+
+# The SPIRE server release that //integration/spireserver runs this plugin
+# under, as an external UpstreamAuthority. Pinned by version and by the
+# SHA-256 GitHub records for each release asset.
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+SPIRE_VERSION = "1.15.5"
+
+[
+    http_archive(
+        name = "spire_linux_" + arch,
+        build_file_content = 'exports_files(["bin/spire-server"], visibility = ["//visibility:public"])',
+        sha256 = sha256,
+        strip_prefix = "spire-" + SPIRE_VERSION,
+        url = "https://github.com/spiffe/spire/releases/download/v{v}/spire-{v}-linux-{arch}-musl.tar.gz".format(
+            arch = arch,
+            v = SPIRE_VERSION,
+        ),
+    )
+    for arch, sha256 in {
+        "amd64": "f0d1740504fc95e49860ea22dcbe878ebbfee4c9bb077c6a586ed66b9c82a62e",
+        "arm64": "451baba77cba6a0b2cdd3ca8b589589418b88673867d2da7f8dac9099252b372",
+    }.items()
+]

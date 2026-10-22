@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "upstreamca",
+    srcs = ["upstreamca.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/upstreamca",
+    visibility = ["//visibility:public"],
+    deps = ["@com_github_spiffe_go_spiffe_v2//spiffeid"],
+)
+
+go_test(
+    name = "upstreamca_test",
+    srcs = ["upstreamca_test.go"],
+    deps = [
+        ":upstreamca",
+        "//internal/testpki",
+        "@com_github_spiffe_go_spiffe_v2//spiffeid",
+    ],
+)

@@ -1,0 +1,54 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "plugin",
+    srcs = [
+        "aws.go",
+        "config.go",
+        "plugin.go",
+    ],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/plugin",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//cache",
+        "//secret",
+        "//upstreamca",
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2//aws/transport/http",
+        "@com_github_aws_aws_sdk_go_v2_config//:config",
+        "@com_github_aws_aws_sdk_go_v2_credentials//stscreds",
+        "@com_github_aws_aws_sdk_go_v2_service_secretsmanager//:secretsmanager",
+        "@com_github_aws_aws_sdk_go_v2_service_sts//:sts",
+        "@com_github_hashicorp_go_hclog//:go-hclog",
+        "@com_github_hashicorp_hcl//:hcl",
+        "@com_github_hashicorp_hcl//hcl/token",
+        "@com_github_spiffe_go_spiffe_v2//spiffeid",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/plugin/server/upstreamauthority/v1:upstreamauthority",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/plugin/types",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/service/common/config/v1:config",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
+    ],
+)
+
+go_test(
+    name = "plugin_test",
+    srcs = [
+        "aws_test.go",
+        "plugin_test.go",
+    ],
+    deps = [
+        ":plugin",
+        "//internal/fakesm",
+        "//internal/testpki",
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_service_secretsmanager//:secretsmanager",
+        "@com_github_hashicorp_go_hclog//:go-hclog",
+        "@com_github_spiffe_spire_plugin_sdk//pluginsdk",
+        "@com_github_spiffe_spire_plugin_sdk//plugintest",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/plugin/server/upstreamauthority/v1:upstreamauthority",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/service/common/config/v1:config",
+        "@org_golang_google_grpc//codes",
+        "@org_golang_google_grpc//status",
+    ],
+)

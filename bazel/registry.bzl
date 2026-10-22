@@ -1,6 +1,6 @@
 """Where the plugin image is published: ONE setting.
 
-The `image_push` of //cmd/upstream-secretsmanager derives its coordinates from
+The `image_push` of //:upstream-secretsmanager derives its coordinates from
 the constants below, and so does the release workflow, through the Bazel
 target. Nothing else may spell the registry out.
 

@@ -1,0 +1,32 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# Runs the SPIRE server release pinned in MODULE.bazel with the plugin as its
+# external UpstreamAuthority, against an in-process fake Secrets Manager.
+go_test(
+    name = "spireserver_test",
+    size = "medium",
+    srcs = ["spireserver_test.go"],
+    args = [
+        "--spire_server=$(rlocationpath :spire_server)",
+        "--plugin=$(rlocationpath //:upstream-secretsmanager)",
+    ],
+    data = [
+        ":spire_server",
+        "//:upstream-secretsmanager",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//internal/fakesm",
+        "//internal/testpki",
+        "@rules_go//go/runfiles",
+    ],
+)
+
+# The spire-server binary of the host's CPU.
+alias(
+    name = "spire_server",
+    actual = select({
+        "@platforms//cpu:aarch64": "@spire_linux_arm64//:bin/spire-server",
+        "@platforms//cpu:x86_64": "@spire_linux_amd64//:bin/spire-server",
+    }),
+)

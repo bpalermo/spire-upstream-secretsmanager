@@ -5,7 +5,13 @@ go_library(
     srcs = ["cache.go"],
     importpath = "github.com/bpalermo/spire-upstream-secretsmanager/cache",
     visibility = ["//visibility:public"],
-    deps = ["//secret"],
+    deps = [
+        "//cache/v1:cache",
+        "//intermediateca",
+        "//secret",
+        "@build_buf_go_protovalidate//:protovalidate",
+        "@org_golang_google_protobuf//encoding/protojson",
+    ],
 )
 
 go_test(
@@ -13,6 +19,7 @@ go_test(
     srcs = ["cache_test.go"],
     deps = [
         ":cache",
+        "//intermediateca",
         "//internal/testpki",
         "//secret",
         "@com_github_spiffe_go_spiffe_v2//spiffeid",

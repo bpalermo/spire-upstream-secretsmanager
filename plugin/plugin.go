@@ -13,7 +13,6 @@ package plugin
 import (
 	"context"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -52,8 +51,8 @@ type Plugin struct {
 	// last is the last good intermediate CA: the one last fetched, or the
 	// one loaded from the cache at Configure.
 	last *secret.Authority
-	// rootInUse is the root of the intermediate CA last signed with.
-	rootInUse *x509.Certificate
+	// inUse is the intermediate CA last signed with.
+	inUse *secret.Authority
 }
 
 // Option configures a Plugin.
@@ -105,9 +104,9 @@ func (p *Plugin) Configure(ctx context.Context, req *configv1.ConfigureRequest) 
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 	client, err := p.newClient(ctx, ClientOptions{
-		Region:        cfg.Region,
-		Endpoint:      cfg.Endpoint,
-		AssumeRoleARN: cfg.AssumeRoleARN,
+		Region:        cfg.GetRegion(),
+		Endpoint:      cfg.GetEndpoint(),
+		AssumeRoleARN: cfg.GetAssumeRoleArn(),
 		Timeout:       cfg.fetchTimeout,
 	})
 	if err != nil {
@@ -132,19 +131,19 @@ func (p *Plugin) Configure(ctx context.Context, req *configv1.ConfigureRequest) 
 // loadCache returns the cached intermediate CA, or nil (with a warning) if
 // there is none that is valid.
 func (p *Plugin) loadCache(cfg *config) *secret.Authority {
-	if cfg.CachePath == "" {
+	if cfg.GetCachePath() == "" {
 		return nil
 	}
-	a, err := cache.Load(cfg.CachePath, p.validateOptions(cfg))
+	a, err := cache.Load(cfg.GetCachePath(), p.validateOptions(cfg))
 	switch {
 	case err == nil:
-		p.logger().Info("Loaded the cached intermediate CA", "path", cfg.CachePath,
+		p.logger().Info("Loaded the cached intermediate CA", "path", cfg.GetCachePath(),
 			"serial", a.Cert.SerialNumber.String(), "not_after", a.Cert.NotAfter.UTC().Format(time.RFC3339))
 		return a
 	case errors.Is(err, fs.ErrNotExist):
-		p.logger().Info("No cached intermediate CA yet", "path", cfg.CachePath)
+		p.logger().Info("No cached intermediate CA yet", "path", cfg.GetCachePath())
 	default:
-		p.logger().Warn("Ignoring the cached intermediate CA", "path", cfg.CachePath, "reason", err.Error())
+		p.logger().Warn("Ignoring the cached intermediate CA", "path", cfg.GetCachePath(), "reason", err.Error())
 	}
 	return nil
 }
@@ -207,12 +206,11 @@ func (p *Plugin) authority(ctx context.Context, cfg *config, client SecretsClien
 	if err != nil {
 		return nil, err
 	}
-	if p.rootInUse != nil && !p.rootInUse.Equal(a.Root) {
-		prev, cur := secret.RootSHA256(p.rootInUse), secret.RootSHA256(a.Root)
-		log.Warn("The upstream root changed", "previous_root_sha256", hex.EncodeToString(prev[:]),
-			"root_sha256", hex.EncodeToString(cur[:]), "subject", a.Root.Subject.String())
+	if p.inUse != nil && !p.inUse.Root.Equal(a.Root) {
+		log.Warn("The upstream root changed", "previous_root_sha256", p.inUse.RootSHA256Hex(),
+			"root_sha256", a.RootSHA256Hex(), "subject", a.Root.Subject.String())
 	}
-	p.rootInUse = a.Root
+	p.inUse = a
 	return a, nil
 }
 
@@ -251,11 +249,11 @@ func (p *Plugin) remember(cfg *config, a *secret.Authority, log hclog.Logger) {
 			"not_after", a.Cert.NotAfter.UTC().Format(time.RFC3339))
 	}
 	p.last = a
-	if cfg.CachePath == "" {
+	if cfg.GetCachePath() == "" {
 		return
 	}
-	if err := cache.Save(cfg.CachePath, a); err != nil {
-		log.Warn("Unable to write the intermediate CA cache", "path", cfg.CachePath, "reason", err.Error())
+	if err := cache.Save(cfg.GetCachePath(), a); err != nil {
+		log.Warn("Unable to write the intermediate CA cache", "path", cfg.GetCachePath(), "reason", err.Error())
 	}
 }
 
@@ -264,16 +262,16 @@ func (p *Plugin) fetch(ctx context.Context, cfg *config, client SecretsClient) (
 	ctx, cancel := context.WithTimeout(ctx, cfg.fetchTimeout)
 	defer cancel()
 
-	if cfg.SecretID != "" {
-		s, err := readSecret(ctx, client, cfg.SecretID)
+	if cfg.GetSecretId() != "" {
+		s, err := readSecret(ctx, client, cfg.GetSecretId())
 		if err != nil {
-			return nil, fmt.Errorf("unable to read %s: %w", cfg.SecretID, err)
+			return nil, fmt.Errorf("unable to read %s: %w", cfg.GetSecretId(), err)
 		}
-		return secret.ParseV1([]byte(s))
+		return secret.ParseV1([]byte(s), p.now())
 	}
 
 	// The awssecret layout, read in awssecret's order.
-	ids := []string{cfg.KeyFileARN, cfg.CertFileARN, cfg.BundleFileARN}
+	ids := []string{cfg.GetKeyFileArn(), cfg.GetCertFileArn(), cfg.GetBundleFileArn()}
 	values := make([]string, len(ids))
 	for i, id := range ids {
 		if id == "" {

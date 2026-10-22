@@ -2,17 +2,22 @@ package plugin
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
+	"buf.build/go/protovalidate"
 	"github.com/hashicorp/hcl"
-	"github.com/hashicorp/hcl/hcl/token"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
+	"google.golang.org/protobuf/encoding/protojson"
+	"google.golang.org/protobuf/reflect/protoreflect"
+
+	pluginv1 "github.com/bpalermo/spire-upstream-secretsmanager/plugin/v1"
 )
 
 const (
@@ -20,63 +25,36 @@ const (
 	defaultMinRemaining = time.Hour
 )
 
-// Config is the plugin_data of the plugin, in HCL.
-type Config struct {
-	// Region, Endpoint and AssumeRoleARN select the AWS Secrets Manager
-	// endpoint and the credentials, as SPIRE's awssecret plugin does.
-	// Endpoint is meant for tests.
-	Region        string `hcl:"region" json:"region"`
-	Endpoint      string `hcl:"endpoint" json:"endpoint"`
-	AssumeRoleARN string `hcl:"assume_role_arn" json:"assume_role_arn"`
-
-	// SecretID is a format v1 secret (docs/secret-format.md).
-	SecretID string `hcl:"secret_id" json:"secret_id"`
-
-	// The layout of SPIRE's awssecret plugin, instead of SecretID: three
-	// secrets whose SecretString is PEM.
-	CertFileARN   string `hcl:"cert_file_arn" json:"cert_file_arn"`
-	KeyFileARN    string `hcl:"key_file_arn" json:"key_file_arn"`
-	BundleFileARN string `hcl:"bundle_file_arn" json:"bundle_file_arn"`
-
-	// CachePath is where the last good intermediate CA is kept.
-	CachePath string `hcl:"cache_path" json:"cache_path"`
-
-	// RootSHA256 is the hex SHA-256 of the DER of the root accepted, or a
-	// list of them (to stage a root rotation). Required.
-	RootSHA256 any `hcl:"root_sha256" json:"root_sha256"`
-
-	// FetchTimeout bounds the Secrets Manager reads of one mint.
-	FetchTimeout string `hcl:"fetch_timeout" json:"fetch_timeout"`
-
-	// MinRemaining is the least lifetime an intermediate CA must have left
-	// to be used.
-	MinRemaining string `hcl:"min_remaining" json:"min_remaining"`
-
-	// UnusedKeys collects the keys HCL did not decode, which are refused:
-	// a misspelt key (root_sha265) must not silently disable a check.
-	UnusedKeys map[string][]token.Pos `hcl:",unusedKeyPositions" json:"-"`
-}
-
-// config is a parsed and validated Config.
+// config is a parsed and validated plugin_data (plugin/v1/config.proto).
 type config struct {
-	Config
+	*pluginv1.Config
 	trustDomain  spiffeid.TrustDomain
-	rootPins     [][]byte
+	rootPins     [][32]byte
 	fetchTimeout time.Duration
 	minRemaining time.Duration
 }
 
+var (
+	validatorOnce sync.Once
+	validator     protovalidate.Validator
+	validatorErr  error
+)
+
 // buildConfig parses and validates the plugin configuration of a Configure
-// or Validate request. It reports every problem it finds.
+// or Validate request: HCL (or JSON, which HCL reads too) is decoded into a
+// generic document, unknown keys are refused, a single root_sha256 string
+// becomes a list of one (and every pin lower case), and the result is read
+// strictly as the JSON of a pluginv1.Config, then checked against the rules of config.proto and the server's
+// trust domain. Every problem of those last two steps is reported.
 func buildConfig(core *configv1.CoreConfiguration, hclText string) (*config, error) {
-	c := &config{}
-	if err := hcl.Decode(&c.Config, hclText); err != nil {
-		return nil, fmt.Errorf("plugin configuration is malformed: %w", err)
+	msg, err := decodeConfig(hclText)
+	if err != nil {
+		return nil, err
 	}
+	c := &config{Config: msg}
 	var errs []error
-	if len(c.UnusedKeys) > 0 {
-		keys := slices.Sorted(maps.Keys(c.UnusedKeys))
-		errs = append(errs, fmt.Errorf("unknown configuration keys: %s", strings.Join(keys, ", ")))
+	if err := validateConfig(msg); err != nil {
+		errs = append(errs, err)
 	}
 	if core == nil || core.TrustDomain == "" {
 		errs = append(errs, errors.New("server core configuration must contain trust_domain"))
@@ -87,90 +65,121 @@ func buildConfig(core *configv1.CoreConfiguration, hclText string) (*config, err
 		}
 		c.trustDomain = td
 	}
-	errs = append(errs, c.validateSource()...)
-	var err error
-	if c.rootPins, err = parsePins(c.RootSHA256); err != nil {
-		errs = append(errs, err)
-	}
-	if c.fetchTimeout, err = parseDuration("fetch_timeout", c.FetchTimeout, defaultFetchTimeout, false); err != nil {
-		errs = append(errs, err)
-	}
-	if c.minRemaining, err = parseDuration("min_remaining", c.MinRemaining, defaultMinRemaining, true); err != nil {
-		errs = append(errs, err)
-	}
 	if len(errs) > 0 {
 		return nil, errors.Join(errs...)
+	}
+	// The rules have checked the forms of these already.
+	for _, h := range msg.GetRootSha256() {
+		var pin [32]byte
+		if _, err := hex.Decode(pin[:], []byte(h)); err != nil {
+			return nil, fmt.Errorf("'root_sha256' value %q is not hexadecimal", h)
+		}
+		c.rootPins = append(c.rootPins, pin)
+	}
+	if c.fetchTimeout, err = parseDuration("fetch_timeout", msg.GetFetchTimeout(), defaultFetchTimeout); err != nil {
+		return nil, err
+	}
+	if c.minRemaining, err = parseDuration("min_remaining", msg.GetMinRemaining(), defaultMinRemaining); err != nil {
+		return nil, err
 	}
 	return c, nil
 }
 
-// validateSource checks that exactly one of the two secret layouts is
-// configured.
-func (c *config) validateSource() []error {
-	awssecret := c.CertFileARN != "" || c.KeyFileARN != "" || c.BundleFileARN != ""
-	switch {
-	case c.SecretID != "" && awssecret:
-		return []error{errors.New("set either 'secret_id' or 'cert_file_arn', 'key_file_arn' and 'bundle_file_arn', not both")}
-	case c.SecretID != "":
-		return nil
-	case !awssecret:
-		return []error{errors.New("configuration missing 'secret_id' value (or 'cert_file_arn' and 'key_file_arn')")}
+// decodeConfig reads plugin_data into a pluginv1.Config.
+func decodeConfig(hclText string) (*pluginv1.Config, error) {
+	var doc map[string]any
+	if err := hcl.Decode(&doc, hclText); err != nil {
+		return nil, fmt.Errorf("plugin configuration is malformed: %w", err)
 	}
-	var errs []error
-	if c.CertFileARN == "" {
-		errs = append(errs, errors.New("configuration missing 'cert_file_arn' value"))
+	if unknown := unknownKeys(doc); len(unknown) > 0 {
+		// A misspelt root_sha265 must not silently disable a check. protojson
+		// refuses unknown keys too; this names all of them at once.
+		return nil, fmt.Errorf("unknown configuration keys: %s", strings.Join(unknown, ", "))
 	}
-	if c.KeyFileARN == "" {
-		errs = append(errs, errors.New("configuration missing 'key_file_arn' value"))
+	normaliseRootPins(doc)
+	data, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("plugin configuration is malformed: %w", err)
 	}
-	return errs
+	msg := &pluginv1.Config{}
+	if err := protojson.Unmarshal(data, msg); err != nil {
+		// An unknown key (a misspelt root_sha265 must not silently disable
+		// a check) or a value of the wrong type; the message names the key.
+		return nil, fmt.Errorf("plugin configuration is invalid: %s", protojsonReason(err))
+	}
+	return msg, nil
 }
 
-// parsePins parses root_sha256: one hex SHA-256 or a list of them. At least
-// one is required.
-func parsePins(v any) ([][]byte, error) {
-	var hexes []string
-	switch v := v.(type) {
-	case nil:
+// unknownKeys are the keys of doc that are not fields of pluginv1.Config,
+// sorted.
+func unknownKeys(doc map[string]any) []string {
+	fields := (&pluginv1.Config{}).ProtoReflect().Descriptor().Fields()
+	var unknown []string
+	for k := range doc {
+		if fields.ByJSONName(k) == nil && fields.ByName(protoreflect.Name(k)) == nil {
+			unknown = append(unknown, k)
+		}
+	}
+	slices.Sort(unknown)
+	return unknown
+}
+
+// normaliseRootPins turns a single root_sha256 string into a list of one,
+// and lower-cases every pin: hexadecimal digits are accepted in either case,
+// as before the schema, which only takes lower case.
+func normaliseRootPins(doc map[string]any) {
+	switch v := doc["root_sha256"].(type) {
 	case string:
-		hexes = []string{v}
+		doc["root_sha256"] = []any{strings.ToLower(v)}
 	case []any:
-		for _, e := range v {
-			s, ok := e.(string)
-			if !ok {
-				return nil, errors.New("'root_sha256' must be a string or a list of strings")
+		for i, e := range v {
+			if s, ok := e.(string); ok {
+				v[i] = strings.ToLower(s)
 			}
-			hexes = append(hexes, s)
 		}
-	case []string:
-		hexes = v
-	default:
-		return nil, errors.New("'root_sha256' must be a string or a list of strings")
 	}
-	if len(hexes) == 0 {
-		return nil, errors.New("configuration missing 'root_sha256': the hex SHA-256 of the root certificate's DER (or a list of them) is required")
-	}
-	pins := make([][]byte, 0, len(hexes))
-	for _, h := range hexes {
-		b, err := hex.DecodeString(strings.TrimSpace(h))
-		if err != nil || len(b) != 32 {
-			return nil, fmt.Errorf("'root_sha256' value %q must be 64 hex characters, the SHA-256 of the root certificate's DER", h)
-		}
-		pins = append(pins, b)
-	}
-	return pins, nil
 }
 
-func parseDuration(name, s string, def time.Duration, zeroOK bool) (time.Duration, error) {
+// protojsonReason is protojson's error without its "proto:" prefix and the
+// non-breaking space it adds, on purpose, so that no one depends on its text.
+func protojsonReason(err error) string {
+	s := strings.ReplaceAll(err.Error(), " ", " ")
+	return strings.TrimSpace(strings.TrimPrefix(s, "proto:"))
+}
+
+// validateConfig checks msg against the rules of config.proto, naming the
+// field that breaks each.
+func validateConfig(msg *pluginv1.Config) error {
+	validatorOnce.Do(func() { validator, validatorErr = protovalidate.New() })
+	if validatorErr != nil {
+		return fmt.Errorf("building the validator: %w", validatorErr)
+	}
+	err := validator.Validate(msg)
+	if err == nil {
+		return nil
+	}
+	var verr *protovalidate.ValidationError
+	if !errors.As(err, &verr) {
+		return fmt.Errorf("plugin configuration is invalid: %w", err)
+	}
+	errs := make([]error, 0, len(verr.Violations))
+	for _, v := range verr.Violations {
+		if field := protovalidate.FieldPathString(v.Proto.GetField()); field != "" {
+			errs = append(errs, fmt.Errorf("'%s' is invalid: %s", field, v.Proto.GetMessage()))
+		} else {
+			errs = append(errs, fmt.Errorf("plugin configuration is invalid: %s", v.Proto.GetMessage()))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func parseDuration(name, s string, def time.Duration) (time.Duration, error) {
 	if s == "" {
 		return def, nil
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
 		return 0, fmt.Errorf("'%s' is not a duration: %w", name, err)
-	}
-	if d < 0 || (d == 0 && !zeroOK) {
-		return 0, fmt.Errorf("'%s' must be positive", name)
 	}
 	return d, nil
 }

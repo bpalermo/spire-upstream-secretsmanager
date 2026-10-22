@@ -1,0 +1,105 @@
+// The configuration of the plugin: its plugin_data, in HCL or JSON.
+//
+// The plugin decodes plugin_data into a generic document, turns a single
+// root_sha256 string into a list of one, and reads the result as the protobuf
+// JSON mapping of Config, refusing unknown keys. The rules below are checked
+// next (protovalidate), and the plugin checks the rest in Go. Every field's
+// JSON name is its own name, so the keys are exactly the names below.
+syntax = "proto3";
+
+package plugin.v1;
+
+import "buf/validate/validate.proto";
+
+option go_package = "github.com/bpalermo/spire-upstream-secretsmanager/plugin/v1;pluginv1";
+
+// Config is the plugin_data of the plugin. The intermediate CA is read either
+// from one secret in the intermediate-ca/v1 format (secret_id), or from the
+// three secrets of SPIRE's awssecret UpstreamAuthority (cert_file_arn,
+// key_file_arn and, optionally, bundle_file_arn); exactly one of the two.
+message Config {
+  option (buf.validate.message).cel = {
+    id: "source.exclusive"
+    message: "set either secret_id or cert_file_arn, key_file_arn and bundle_file_arn, not both"
+    expression: "this.secret_id == '' || (this.cert_file_arn == '' && this.key_file_arn == '' && this.bundle_file_arn == '')"
+  };
+  option (buf.validate.message).cel = {
+    id: "source.required"
+    message: "secret_id (or cert_file_arn and key_file_arn) is required"
+    expression: "this.secret_id != '' || this.cert_file_arn != '' || this.key_file_arn != '' || this.bundle_file_arn != ''"
+  };
+  option (buf.validate.message).cel = {
+    id: "source.awssecret"
+    message: "the awssecret layout needs both cert_file_arn and key_file_arn"
+    expression: "(this.cert_file_arn == '' && this.key_file_arn == '' && this.bundle_file_arn == '') || (this.cert_file_arn != '' && this.key_file_arn != '')"
+  };
+
+  // region is the AWS region of Secrets Manager. Empty: the AWS SDK's default
+  // (AWS_REGION, the shared configuration).
+  string region = 1;
+
+  // endpoint replaces the Secrets Manager endpoint URL. Meant for tests.
+  string endpoint = 2;
+
+  // assume_role_arn is a role to assume, with the default credentials, before
+  // calling Secrets Manager.
+  string assume_role_arn = 3 [json_name = "assume_role_arn"];
+
+  // secret_id is the name or ARN of a secret in the intermediate-ca/v1
+  // format.
+  string secret_id = 4 [json_name = "secret_id"];
+
+  // cert_file_arn is the secret of the awssecret layout that holds the CA
+  // certificate, optionally followed by the certificates up to the root, as
+  // PEM.
+  string cert_file_arn = 5 [json_name = "cert_file_arn"];
+
+  // key_file_arn is the secret of the awssecret layout that holds the CA's
+  // private key, as PEM (PKCS#8, SEC 1 or PKCS#1).
+  string key_file_arn = 6 [json_name = "key_file_arn"];
+
+  // bundle_file_arn is the secret of the awssecret layout that holds the
+  // upstream trust bundle, as PEM. Empty: the CA is self-signed and its own
+  // root.
+  string bundle_file_arn = 7 [json_name = "bundle_file_arn"];
+
+  // cache_path is the file the last good intermediate CA is kept in (a
+  // cache.v1.CacheEntry). Empty: no cache on disk.
+  string cache_path = 8 [json_name = "cache_path"];
+
+  // root_sha256 holds the SHA-256s of the DER of the roots accepted, each as
+  // 64 lower-case hexadecimal digits; more than one stages a root rotation.
+  // In HCL or JSON, a single string is a list of one.
+  repeated string root_sha256 = 9 [
+    json_name = "root_sha256",
+    (buf.validate.field).repeated = {
+      min_items: 1
+      max_items: 16
+      items: {
+        string: {pattern: "^[0-9a-f]{64}$"}
+      }
+    }
+  ];
+
+  // fetch_timeout bounds the Secrets Manager reads of one mint, as a Go
+  // duration ("10s"). Empty: 10s. It must be positive.
+  string fetch_timeout = 10 [
+    json_name = "fetch_timeout",
+    (buf.validate.field).cel = {
+      id: "fetch_timeout.duration"
+      message: "fetch_timeout must be a positive duration, such as \"10s\""
+      expression: "this == '' || (this.matches('^[-+]?(0|(([0-9]+(\\\\.[0-9]*)?|\\\\.[0-9]+)(ns|us|µs|ms|s|m|h))+)$') && duration(this) > duration('0s'))"
+    }
+  ];
+
+  // min_remaining is the least lifetime an intermediate CA must have left to
+  // be used, as a Go duration ("1h"). Empty: 1h. It may be zero.
+  string min_remaining = 11 [
+    json_name = "min_remaining",
+    (buf.validate.field).cel = {
+      id: "min_remaining.duration"
+      message: "min_remaining must be a duration that is not negative, such as \"1h\""
+      expression: "this == '' || (this.matches('^[-+]?(0|(([0-9]+(\\\\.[0-9]*)?|\\\\.[0-9]+)(ns|us|µs|ms|s|m|h))+)$') && duration(this) >= duration('0s'))"
+    }
+  ];
+}

@@ -115,14 +115,18 @@ UpstreamAuthority "secretsmanager" {
 | `assume_role_arn` | none | Role to assume (with STS `AssumeRole`) on top of the default credentials, as `awssecret` does. |
 | `secret_id` | | ARN or name of a secret in [format v1](docs/secret-format.md). |
 | `cert_file_arn`, `key_file_arn`, `bundle_file_arn` | | Instead of `secret_id`: the three-secret layout of `awssecret`, each secret's `SecretString` being PEM, read exactly as `awssecret` reads them. `cert_file_arn` holds the CA certificate, optionally followed by intermediates; `key_file_arn` its key; `bundle_file_arn` the root(s). `bundle_file_arn` may be left out only if `cert_file_arn` is one self-signed certificate. |
-| `cache_path` | none | File where the last good intermediate is kept (format v1, mode 0600). Optional but recommended: without it a restarted server cannot mint while Secrets Manager is unreachable. |
+| `cache_path` | none | File where the last good intermediate is kept (a `cache.v1.CacheEntry`, mode 0600). Optional but recommended: without it a restarted server cannot mint while Secrets Manager is unreachable. |
 | `root_sha256` | **required** | Hex SHA-256 of the root certificate's DER, or a list of them. An intermediate under any other root is refused, whether read from Secrets Manager or from the cache. A list stages a root rotation: pin the new root next to the old one, then switch the secret. |
 | `fetch_timeout` | `10s` | Time limit for the Secrets Manager reads of one mint. It is also the timeout of every HTTP request of the AWS client (Secrets Manager, STS and the other credential endpoints), so a hung request cannot outlive a mint. |
 | `min_remaining` | `1h` | An intermediate (fetched or cached) with less than this left before its `NotAfter` is not used. |
 
 Set either `secret_id` or the `awssecret` layout, not both. Unknown keys are
 refused, so a misspelt key (`root_sha265`) fails the configuration instead of
-disabling a check. The SPIRE server's `trust_domain` is used to check CSRs and
+disabling a check. `plugin_data` may be HCL or JSON; either way it is read as
+the protobuf JSON of `Config` in
+[plugin/v1/config.proto](plugin/v1/config.proto), whose protovalidate rules
+are its reference (a single `root_sha256` string is a list of one, and the
+pins may be upper or lower case). The SPIRE server's `trust_domain` is used to check CSRs and
 the intermediate.
 
 `root_sha256` is required because anyone who can write the secret
@@ -218,9 +222,12 @@ Beyond what [the specification](docs/secret-format.md) requires of every
 reader, the plugin refuses an intermediate whose root is not one of
 `root_sha256`, one with less than `min_remaining` of its lifetime left, and
 one that cannot sign a CA for the SPIRE trust domain that SPIRE accepts (path
-length, name constraints). The cache file is written in the same format; with
-the awssecret layout it adds an `x_upstream_bundle` field holding the whole
-bundle, which the plugin reads only from its cache, never from a secret.
+length, name constraints). The cache file is the protobuf JSON of a
+`CacheEntry` ([cache/v1/cache.proto](cache/v1/cache.proto)): the secret, in
+the format, and, with the awssecret layout, the whole bundle
+(`upstream_bundle`). It is read strictly: a file with an unknown field, or one
+in the layout of earlier versions, is ignored with a warning and replaced at
+the next successful mint.
 
 ### Cache and slack
 

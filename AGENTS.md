@@ -116,10 +116,17 @@ Libraries of the plugin:
 - `plugin`: the plugin (Configure, Validate, MintX509CAAndSubscribe), its HCL
   configuration and the AWS client, behind the narrow `SecretsClient`
   interface so tests use fakes.
-- `secret`: reading the secret (format v1 and the awssecret three-secret
-  layout) and the plugin's own checks (root pin, remaining lifetime, the
-  SPIRE probe).
-- `cache`: the on-disk cache (atomic 0600 write, load and validate).
+- `secret`: reading the secret (format v1 with `intermediateca.DecodeAt`, and
+  the awssecret three-secret layout, which yields an `intermediateca.Bundle`
+  too) and the plugin's own checks (root pin, remaining lifetime, the SPIRE
+  probe).
+- `cache`: the on-disk cache (atomic 0600 write, load and validate), a
+  `cache/v1` `CacheEntry` (proto package `cache.v1`) read as strict protobuf
+  JSON.
+- `plugin/v1`: the schema of `plugin_data`, `config.proto` (proto package
+  `plugin.v1`); `plugin` decodes HCL or JSON into a generic document, refuses
+  unknown keys, normalises `root_sha256`, reads it as strict protobuf JSON,
+  runs protovalidate, then the Go checks.
 - `upstreamca`: CSR signing, adapted from SPIRE's `x509svid.UpstreamCA`.
 
 Libraries of the rotator:

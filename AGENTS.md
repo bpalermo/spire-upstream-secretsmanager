@@ -14,7 +14,7 @@ module:
   `github.com/spiffe/spire-plugin-sdk`): one statically linked binary,
   `upstream-secretsmanager`, that the SPIRE server executes. Behaviour follows
   SPIRE's built-in `disk` and `awssecret` UpstreamAuthority plugins (v1.15.5)
-  unless the README says otherwise.
+  unless docs/plugin.md says otherwise.
 - **The rotator** (`rotator/`): an AWS Lambda that implements Secrets Manager
   rotation for a name-constrained intermediate CA signed by an AWS KMS key.
   It is generic: nothing in it depends on the plugin.

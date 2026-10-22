@@ -101,7 +101,7 @@ func TestFileFormat(t *testing.T) {
 	}
 }
 
-// A cache seeded by hand, as the README's cold-start section does it with
+// A cache seeded by hand, as docs/plugin.md's cold-start section does it with
 // `jq '{secret: .}'` over the secret's SecretString, loads.
 func TestLoadSeededFromSecretString(t *testing.T) {
 	v1 := testpki.New(t, testpki.Options{Middle: 1}).V1(t)

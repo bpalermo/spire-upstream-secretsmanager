@@ -1,0 +1,231 @@
+# kms-intermediate-rotator: the rotation Lambda
+
+An AWS Secrets Manager rotation Lambda that keeps a name-constrained
+intermediate CA, signed by an AWS KMS key, in a secret. The root CA's private
+key stays in KMS. On each rotation the Lambda generates a new intermediate
+key, builds the intermediate certificate from its own configuration, has KMS
+sign it, and stores certificate, key and root in the secret in the
+[`intermediate-ca/v1` format](secret-format.md). Whatever consumes the
+intermediate reads the secret's `AWSCURRENT` version; the rotator knows
+nothing about it.
+
+It runs on the `provided.al2023` custom runtime, arm64 or x86_64, as the
+executable `bootstrap`.
+
+## Rotation flow
+
+Secrets Manager invokes the function four times per rotation, with
+`{"SecretId", "ClientRequestToken", "Step"}` and, when the function rotates
+through an assumed role or across accounts, a `RotationToken`, which is passed
+on to `PutSecretValue` (and never logged). Before every step, as the AWS
+rotation templates do, the function checks that the secret is in its
+configuration (by full ARN; a `SecretId` given as a name is resolved with
+`DescribeSecret`), that rotation is enabled on it and that the token is one of
+its versions. If that version is already `AWSCURRENT` the step succeeds and
+does nothing; if it is not `AWSPENDING` the step fails.
+
+1. **createSecret**: if the `AWSPENDING` version of the token already has a
+   value (a retry), it returns without signing again. Otherwise it generates a
+   key, builds the certificate from the secret's configuration, signs it with
+   KMS (`Sign`, `MessageType: DIGEST`, on the key ARN `GetPublicKey` resolved
+   `kms_key_id` to at start), checks the signature against the root and that
+   a chain as deep as its path length allows verifies, and writes the secret
+   with `PutSecretValue` (the token, `VersionStages: [AWSPENDING]`). If a
+   concurrent invocation for the same token stored its version first, that
+   one is kept and the step succeeds.
+2. **setSecret**: nothing; there is no service to configure.
+3. **testSecret**: reads `AWSPENDING` and checks it as a reader would (the
+   format's `Decode`: schema, key matches cert, cert is a CA and verifies to
+   the root), that its root is the configured one, that subject, basic
+   constraints, path length, key usage, name constraints and key type equal
+   the configuration, that a throwaway chain as deep as its path length
+   allows (sub-CAs and a leaf, made in memory) verifies to the root, and its
+   lifetime:
+   - measured from its issuance (`NotBefore` + 5m), it was given the
+     configured `validity` (or up to the root's `NotAfter`, if sooner);
+   - it has at least `min_remaining` (default half the validity) left now.
+
+   So a rotation retried days later with the same `AWSPENDING` version still
+   passes, and one whose pending version is mostly used up fails (see
+   [Recovering a stuck rotation](#recovering-a-stuck-rotation)).
+
+   A `testSecret` with nothing to test (the token is not a version of the
+   secret, or its `AWSPENDING` version has no value) is the configuration test
+   Secrets Manager runs when rotation is set up without rotating immediately:
+   it succeeds, since the configuration and the KMS key were checked at start,
+   and is logged as a configuration test. A pending version with a value is
+   always tested in full.
+4. **finishSecret**: moves `AWSCURRENT` to the token with
+   `UpdateSecretVersionStage`, removing it from the version that had it
+   (Secrets Manager then labels that one `AWSPREVIOUS`).
+
+At cold start, before serving anything, the function loads its configuration
+and calls KMS `GetPublicKey`: if the key's public key is not the configured
+root certificate's, it refuses to start.
+
+## The certificate
+
+Nothing in it comes from the event; everything comes from the configuration:
+
+- the configured subject; a random positive 128-bit serial number;
+- `NotBefore` = now − 5m, `NotAfter` = now + `validity`, never after the
+  root's `NotAfter`;
+- basic constraints `CA:TRUE` with the configured path length (0 included),
+  critical; key usage `keyCertSign | cRLSign`, critical;
+- name constraints, critical, when any are configured: permitted and excluded
+  URI domains and DNS domains (see below);
+- subject key identifier = SHA-1 of the new public key (RFC 5280 method 1);
+  authority key identifier = the root's subject key identifier.
+
+What it writes (informative; the format is the contract): `cert` is issued
+directly by the root, so `chain` is always `""`; `root` is the configured
+`root_certificate`, re-encoded from its DER; `key` is a newly generated key of
+the configured `key_type`, which exists only in the Lambda's memory and in the
+secret; the JSON is what `intermediateca.Encode` writes.
+
+For SPIRE, keep `max_path_len` at 1 or more: SPIRE's own CA is a CA below the
+intermediate, and the plugin refuses an intermediate that cannot sign one.
+
+### Name constraints: verifiers differ
+
+A domain without a leading dot does not mean the same everywhere:
+
+| Constraint | Go `crypto/x509` (URI and DNS) | RFC 5280, OpenSSL, BoringSSL (URI) |
+| --- | --- | --- |
+| `example.org` | `example.org` **and every host below it** | `example.org` only |
+| `.example.org` | hosts below `example.org`, not `example.org` | hosts below `example.org` |
+
+So `permitted_uri_domains: ["example.org"]` alone lets a Go verifier accept
+`spiffe://sub.example.org`. To allow exactly one host (a SPIFFE trust domain,
+for instance) in every stack, pair the two:
+
+```json
+"name_constraints": {
+  "permitted_uri_domains": ["example.org"],
+  "excluded_uri_domains": [".example.org"]
+}
+```
+
+For DNS constraints all of them read `example.org` as the domain and its
+subdomains. [verifiers/RESULTS.md](../verifiers/RESULTS.md) records what Envoy,
+MySQL, Kafka and Go actually enforce.
+
+### Path length and the root
+
+The intermediate is one CA below the root. At start the configuration is
+refused if the root's path length is 0, if a secret's `max_path_len` does not
+fit under it (`max_path_len` ≤ root path length − 1), or if the root has a key
+usage without `keyCertSign`. createSecret and testSecret also verify a chain
+of the full depth, so an intermediate whose chains could not verify is never
+promoted.
+
+### The root's expiry
+
+`NotAfter` is capped at the root's, and testSecret wants `min_remaining` left,
+so rotation starts to fail once the root has less than `min_remaining` left:
+the current intermediate stays in place and keeps working until it expires.
+Alarm on rotation failures and renew the root before then.
+
+## Rotator configuration
+
+Exactly one of these environment variables must be set:
+
+| Variable | Value |
+| --- | --- |
+| `ROTATOR_CONFIG` | the configuration, inline JSON |
+| `ROTATOR_CONFIG_PARAMETER` | the name of an SSM parameter (`String` or `SecureString`) holding it, read once per cold start |
+
+The configuration is the protobuf JSON of `Config` in
+[config/v1/config.proto](../config/v1/config.proto), which is its reference:
+every field, its default and its rules are there.
+
+```json
+{
+  "kms_key_id": "alias/example-root",
+  "root_certificate": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----\n",
+  "signing_algorithm": "",
+  "secrets": {
+    "arn:aws:secretsmanager:us-east-1:111122223333:secret:example-AbCdEf": {
+      "subject": {"common_name": "Example Intermediate CA", "organization": ["Example"], "country": ["US"]},
+      "key_type": "ec-p256",
+      "validity": "2160h",
+      "min_remaining": "1080h",
+      "max_path_len": 1,
+      "name_constraints": {
+        "permitted_uri_domains": ["example.org"],
+        "excluded_uri_domains": [],
+        "permitted_dns_domains": [".example.org"],
+        "excluded_dns_domains": []
+      }
+    }
+  }
+}
+```
+
+| Field | Meaning | Default |
+| --- | --- | --- |
+| `kms_key_id` | the root's KMS key: key ID, key ARN, alias name (`alias/...`) or alias ARN; an asymmetric `SIGN_VERIFY` key | required |
+| `root_certificate` | the root certificate: exactly one PEM `CERTIFICATE` block, nothing before or after it, at most 16 KiB; its public key must be the KMS key's | required |
+| `signing_algorithm` | a KMS signing algorithm (`ECDSA_SHA_256`, `ECDSA_SHA_384`, `ECDSA_SHA_512`, `RSASSA_PKCS1_V1_5_SHA_*`, `RSASSA_PSS_SHA_*`) | from the key spec: `ECC_NIST_P256` → `ECDSA_SHA_256`, `ECC_NIST_P384` → `ECDSA_SHA_384`, `ECC_NIST_P521` → `ECDSA_SHA_512`, `RSA_*` → `RSASSA_PKCS1_V1_5_SHA_256` |
+| `secrets` | per secret, by ARN (`arn:<partition>:secretsmanager:<region>:<account>:secret:<name>`): what to issue (a `SecretProfile`). Use the full ARN (with the six random characters Secrets Manager appends) or the ARN without them. An event for any other secret fails. | at least one |
+| `subject` | `common_name` (required, at most 64 characters), `organization`, `organizational_unit`, `country`, `province`, `locality` | required |
+| `key_type` | the intermediate's key: `ec-p256`, `ec-p384`, `rsa-2048`, `rsa-4096` | `ec-p256` |
+| `validity` | a Go duration string of `h`, `m`, `s`, `ms`, `us`, `ns` (`"2160h"`, `"1.5h"`, `"2h30m"`), positive | `2160h` (90 days) |
+| `min_remaining` | a duration like `validity`: the least validity a pending intermediate must have left for testSecret to promote it; at most `validity` | half of `validity` |
+| `max_path_len` | path length constraint, 0 to 8, and at most the root's path length − 1 | `1` |
+| `name_constraints` | `permitted_uri_domains`, `excluded_uri_domains`, `permitted_dns_domains`, `excluded_dns_domains`: host names, each optionally with a leading dot (no scheme, port, path or wildcard), at most 64 per list | none |
+
+An empty string is the same as a missing field. Unknown fields are errors, at
+every level, so a misspelt setting does not go unnoticed; protobuf JSON also
+accepts each field's lowerCamelCase name (`kmsKeyId`). The checks run in this
+order, and the first that fails stops the Lambda from starting: the JSON
+against the schema (unknown fields, types), the schema's rules
+(protovalidate), then the ones a schema cannot express: the root certificate
+parses and is a CA that may sign certificates and issue an intermediate
+(`keyCertSign`, a path length other than 0), each `max_path_len` fits under
+it, and, at start, the KMS key's public key is the root's. No error contains
+the certificate.
+
+## Recovering a stuck rotation
+
+A version's value cannot change, and Secrets Manager retries a failed rotation
+with the same `AWSPENDING` version. When testSecret rejects that value (too
+little validity left, a root that is no longer the configured one, a
+configuration changed since it was issued), every retry fails the same way,
+and the error says so. Take the label off the version, and the next rotation
+starts afresh with a new token:
+
+```bash
+aws secretsmanager update-secret-version-stage \
+  --secret-id arn:aws:secretsmanager:us-east-1:111122223333:secret:example-AbCdEf \
+  --version-stage AWSPENDING \
+  --remove-from-version-id <the version in the error>
+aws secretsmanager rotate-secret \
+  --secret-id arn:aws:secretsmanager:us-east-1:111122223333:secret:example-AbCdEf
+```
+
+`AWSCURRENT` is untouched throughout: readers keep the current intermediate.
+
+## Rotator IAM permissions
+
+The Lambda's execution role needs:
+
+| Actions | Resource |
+| --- | --- |
+| `kms:GetPublicKey`, `kms:Sign` | the root KMS key (by key ARN; IAM does not match aliases) |
+| `secretsmanager:DescribeSecret`, `secretsmanager:GetSecretValue`, `secretsmanager:PutSecretValue`, `secretsmanager:UpdateSecretVersionStage` | the rotated secrets |
+| `kms:Decrypt`, `kms:GenerateDataKey` (Encrypt) | the KMS key the secrets are encrypted with, when it is a customer managed key |
+| `ssm:GetParameter` | the configuration parameter, with `ROTATOR_CONFIG_PARAMETER` only |
+| `kms:Decrypt` | the parameter's key, for a `SecureString` with a customer managed key |
+| `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents` | its log group (`AWSLambdaBasicExecutionRole`) |
+
+Secrets Manager must be allowed to invoke the function (a resource policy for
+`secretsmanager.amazonaws.com`). The function calls KMS, Secrets Manager and,
+with the parameter form, SSM: in a VPC it needs endpoints or a route to them.
+
+## Logs
+
+One JSON object per line on stdout (`log/slog`). Each issued certificate is
+logged once, with `secret_arn`, `serial` (hex), `not_after` (RFC 3339) and
+`public_key_sha256` (SHA-256 of the SubjectPublicKeyInfo DER). No private key
+or certificate is ever logged.

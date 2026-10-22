@@ -3,8 +3,10 @@ package plugin
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -19,9 +21,20 @@ type SecretsClient interface {
 	GetSecretValue(ctx context.Context, in *secretsmanager.GetSecretValueInput, optFns ...func(*secretsmanager.Options)) (*secretsmanager.GetSecretValueOutput, error)
 }
 
-// NewClientFunc builds the Secrets Manager client for a configuration. It
-// must not call AWS: credentials are resolved on the first request.
-type NewClientFunc func(ctx context.Context, cfg Config) (SecretsClient, error)
+// ClientOptions are the settings of the Secrets Manager client.
+type ClientOptions struct {
+	Region        string
+	Endpoint      string
+	AssumeRoleARN string
+	// Timeout bounds every HTTP request the client makes, to Secrets
+	// Manager and to the credential endpoints (STS, web identity, container
+	// and instance metadata), so that a hung request cannot outlive a mint.
+	Timeout time.Duration
+}
+
+// NewClientFunc builds the Secrets Manager client. It must not call AWS:
+// credentials are resolved on the first request.
+type NewClientFunc func(ctx context.Context, opts ClientOptions) (SecretsClient, error)
 
 // NewSecretsManagerClient builds a Secrets Manager client from the default
 // AWS configuration (environment, shared config and credentials files, web
@@ -29,8 +42,11 @@ type NewClientFunc func(ctx context.Context, cfg Config) (SecretsClient, error)
 // with the configured region and endpoint, assuming assume_role_arn if set,
 // as SPIRE's awssecret plugin does. LoadDefaultConfig makes no request, so
 // neither does this.
-func NewSecretsManagerClient(ctx context.Context, cfg Config) (SecretsClient, error) {
+func NewSecretsManagerClient(ctx context.Context, cfg ClientOptions) (SecretsClient, error) {
 	var opts []func(*awsconfig.LoadOptions) error
+	if cfg.Timeout > 0 {
+		opts = append(opts, awsconfig.WithHTTPClient(awshttp.NewBuildableClient().WithTimeout(cfg.Timeout)))
+	}
 	if cfg.Region != "" {
 		opts = append(opts, awsconfig.WithRegion(cfg.Region))
 	}

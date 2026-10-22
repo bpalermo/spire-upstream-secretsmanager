@@ -18,6 +18,29 @@ type Server struct {
 	mu       sync.Mutex
 	values   map[string]string
 	requests []Request
+	// hang, when not nil, makes requests wait until it is closed or the
+	// client goes away.
+	hang chan struct{}
+}
+
+// Hang makes every request hang until [Server.Recover] or until the client
+// gives up.
+func (s *Server) Hang() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hang == nil {
+		s.hang = make(chan struct{})
+	}
+}
+
+// Recover ends [Server.Hang].
+func (s *Server) Recover() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.hang != nil {
+		close(s.hang)
+		s.hang = nil
+	}
 }
 
 // Request is a GetSecretValue request the server received.
@@ -52,6 +75,16 @@ func (s *Server) Requests() []Request {
 }
 
 func (s *Server) handle(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	hang := s.hang
+	s.mu.Unlock()
+	if hang != nil {
+		select {
+		case <-hang:
+		case <-r.Context().Done():
+			return
+		}
+	}
 	if r.Method != http.MethodPost || r.Header.Get("X-Amz-Target") != "secretsmanager.GetSecretValue" {
 		writeError(w, http.StatusBadRequest, "UnknownOperationException", "unsupported operation")
 		return

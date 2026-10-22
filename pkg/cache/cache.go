@@ -33,7 +33,7 @@ func Load(path string, opts secret.ValidateOptions) (*secret.Authority, error) {
 	if err != nil {
 		return nil, err
 	}
-	a, err := secret.ParseV1(data)
+	a, err := secret.ParseCache(data)
 	if err != nil {
 		return nil, fmt.Errorf("cache %s is corrupt: %w", path, err)
 	}

@@ -15,5 +15,6 @@ go_test(
         ":cache",
         "//internal/testpki",
         "//pkg/secret",
+        "@com_github_spiffe_go_spiffe_v2//spiffeid",
     ],
 )

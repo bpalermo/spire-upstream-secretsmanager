@@ -12,7 +12,7 @@ This plugin:
 
 - reads the `AWSCURRENT` version of the secret every time SPIRE asks for a new X.509 CA, so a rotated (or emergency-replaced) intermediate is used from the next CA rotation on, without a restart;
 - makes no AWS call when it is configured, so SPIRE starts with AWS unreachable;
-- validates what it reads (key matches certificate, certificate is a CA, it verifies to the root through the chain, optional root pin, enough lifetime left) and keeps the last good copy in memory and, optionally, on disk, falling back to it when Secrets Manager cannot be read or returns something invalid.
+- validates what it reads (key matches certificate, certificate is a CA, it verifies to a pinned root through the chain, it can sign a CA for the trust domain that SPIRE will accept, enough lifetime left) and keeps the last good copy in memory and, optionally, on disk, falling back to it when Secrets Manager cannot be read or returns something invalid.
 
 Everything else behaves as SPIRE's built-in `disk` and `awssecret` plugins do: the CSR checks, the certificate template of the minted CA, the response layout, and JWT-SVID publishing and `SubscribeToLocalBundle` being unsupported.
 
@@ -41,11 +41,22 @@ UpstreamAuthority "secretsmanager" {
 | `secret_id` | | ARN or name of a secret in [format v1](docs/secret-format.md). |
 | `cert_file_arn`, `key_file_arn`, `bundle_file_arn` | | Instead of `secret_id`: the three-secret layout of `awssecret`, each secret's `SecretString` being PEM, read exactly as `awssecret` reads them. `cert_file_arn` holds the CA certificate, optionally followed by intermediates; `key_file_arn` its key; `bundle_file_arn` the root(s). `bundle_file_arn` may be left out only if `cert_file_arn` is one self-signed certificate. |
 | `cache_path` | none | File where the last good intermediate is kept (format v1, mode 0600). Optional but recommended: without it a restarted server cannot mint while Secrets Manager is unreachable. |
-| `root_sha256` | none | Hex SHA-256 of the root certificate's DER. If set, an intermediate under any other root is refused, whether read from Secrets Manager or from the cache. |
-| `fetch_timeout` | `10s` | Time limit for the Secrets Manager reads of one mint. |
+| `root_sha256` | **required** | Hex SHA-256 of the root certificate's DER, or a list of them. An intermediate under any other root is refused, whether read from Secrets Manager or from the cache. A list stages a root rotation: pin the new root next to the old one, then switch the secret. |
+| `fetch_timeout` | `10s` | Time limit for the Secrets Manager reads of one mint. It is also the timeout of every HTTP request of the AWS client (Secrets Manager, STS and the other credential endpoints), so a hung request cannot outlive a mint. |
 | `min_remaining` | `1h` | An intermediate (fetched or cached) with less than this left before its `NotAfter` is not used. |
 
-Set either `secret_id` or the `awssecret` layout, not both. The SPIRE server's `trust_domain` is used to check CSRs.
+Set either `secret_id` or the `awssecret` layout, not both. Unknown keys are refused, so a misspelt key (`root_sha265`) fails the configuration instead of disabling a check. The SPIRE server's `trust_domain` is used to check CSRs and the intermediate.
+
+`root_sha256` is required because anyone who can write the secret (`secretsmanager:PutSecretValue`) could otherwise install a trust anchor of their own, which SPIRE would add to its bundle. Compute it from the root certificate with, for example, `openssl x509 -in root.pem -outform DER | sha256sum`. To rotate the root, configure both pins:
+
+```hcl
+root_sha256 = [
+  "<hex SHA-256 of the current root>",
+  "<hex SHA-256 of the next root>",
+]
+```
+
+A change of the root actually in use is logged at WARN.
 
 Credentials come from the AWS SDK's default chain: environment variables, the shared config and credentials files (profiles, `credential_process`), web identity (`AWS_WEB_IDENTITY_TOKEN_FILE`, so IRSA works), the container credentials endpoint (ECS, EKS Pod Identity) and the EC2 instance metadata service (`AWS_EC2_METADATA_SERVICE_ENDPOINT` is honoured). The plugin runs with the SPIRE server's environment.
 
@@ -81,12 +92,12 @@ The plugin only reads. On the one secret (each of the three, with the `awssecret
 When SPIRE prepares a new X.509 CA, the plugin:
 
 1. reads the `AWSCURRENT` version of the secret(s), within `fetch_timeout`;
-2. validates it: format v1 (or the `awssecret` layout), the key matches the certificate, the certificate is a CA and verifies to the root through the chain, the root matches `root_sha256` if set, and at least `min_remaining` is left;
+2. validates it: format v1 (or the `awssecret` layout), the key matches the certificate, the certificate is a CA and verifies to the root through the chain, the root is one of `root_sha256`, at least `min_remaining` is left, and the intermediate can actually be used: the plugin signs a throwaway CA for `spiffe://<trust domain>` with it and a throwaway X509-SVID under that CA, and verifies the SVID through `[CA, intermediate, chain...]` to the root, as SPIRE checks every CA an UpstreamAuthority returns. An intermediate whose path length or name constraints leave no room for the SPIRE CA is therefore refused here, and does not replace the cache;
 3. on success, writes it to `cache_path` (atomically: a temporary file in the same directory, fsync, rename, fsync of the directory; mode 0600) and uses it. On failure, it logs a warning with the reason and uses the last good copy (the last one fetched, or the one loaded from `cache_path` at startup) if that still passes step 2 at the current time; if there is none, the mint fails and SPIRE retries;
 4. signs SPIRE's CSR as SPIRE's own `disk` plugin does: the CSR's signature must be valid and its only URI SAN must be `spiffe://<trust domain>`; the CA is valid from 10 seconds ago until now plus SPIRE's preferred TTL (1 hour if SPIRE gives none), but never after the intermediate's `NotAfter`;
-5. returns the chain `[new CA, intermediate, chain...]` and the upstream roots `[root]`. When the CA from the `awssecret` layout is self-signed, the chain is `[new CA]` and the root is that CA, as with `awssecret`.
+5. returns the chain `[new CA, intermediate, chain...]` and the upstream roots: `[root]` for format v1; the whole `bundle_file_arn` bundle with the `awssecret` layout, as `awssecret` does (the chain must still verify to a pinned root in it). When the CA from the `awssecret` layout is self-signed, the chain is `[new CA]` and the root is that CA, as with `awssecret`.
 
-At startup (Configure) the plugin only parses the configuration and loads `cache_path` if it exists; an invalid or expiring cache is ignored with a warning.
+At startup (Configure) the plugin only parses the configuration and loads `cache_path` if it exists; an invalid, unpinned or expiring cache is ignored with a warning. A later Configure without a valid cache keeps the in-memory last good copy, which is validated against the new configuration when it is used.
 
 ### Cache and slack
 
@@ -136,7 +147,8 @@ spire-server:
           region: us-east-1
           secret_id: arn:aws:secretsmanager:us-east-1:111122223333:secret:example
           cache_path: /run/spire/data/upstream-secretsmanager.json
-          root_sha256: "<hex SHA-256 of the root certificate's DER>"
+          root_sha256:
+            - "<hex SHA-256 of the root certificate's DER>"
 ```
 
 `/run/spire/data` is the chart's persistent volume, so the cache survives a restart. Give the server's service account the IAM permissions above (for example with IRSA).

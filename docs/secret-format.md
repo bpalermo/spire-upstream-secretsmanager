@@ -24,7 +24,11 @@ a `cert` that does not verify to `root` through `chain`. Unknown extra fields ar
 
 In addition to the rules above, the plugin refuses an intermediate that is not
 a CA certificate (basic constraints `CA:TRUE`, and `keyCertSign` if key usage
-is present), one whose root does not match `root_sha256` when that is set, and
-one with less than `min_remaining` of its lifetime left. `chain` is ordered
-from the certificate that signed `cert` towards the root. The plugin's cache
-file (`cache_path`) is written in this same format.
+is present), one whose root is not one of the configured `root_sha256`, one
+with less than `min_remaining` of its lifetime left, and one that cannot sign a
+CA for the SPIRE trust domain that SPIRE accepts (path length, name
+constraints). `chain` is ordered from the certificate that signed `cert`
+towards the root. The plugin's cache file (`cache_path`) is written in this
+same format; with the awssecret layout it adds an `x_upstream_bundle` field
+holding the whole bundle, which the plugin reads only from its cache, never
+from a secret.

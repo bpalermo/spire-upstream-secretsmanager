@@ -13,6 +13,7 @@ package plugin
 import (
 	"context"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -51,6 +52,8 @@ type Plugin struct {
 	// last is the last good intermediate CA: the one last fetched, or the
 	// one loaded from the cache at Configure.
 	last *secret.Authority
+	// rootInUse is the root of the intermediate CA last signed with.
+	rootInUse *x509.Certificate
 }
 
 // Option configures a Plugin.
@@ -101,7 +104,12 @@ func (p *Plugin) Configure(ctx context.Context, req *configv1.ConfigureRequest) 
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
-	client, err := p.newClient(ctx, cfg.Config)
+	client, err := p.newClient(ctx, ClientOptions{
+		Region:        cfg.Region,
+		Endpoint:      cfg.Endpoint,
+		AssumeRoleARN: cfg.AssumeRoleARN,
+		Timeout:       cfg.fetchTimeout,
+	})
 	if err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "failed to create AWS client: %v", err)
 	}
@@ -113,7 +121,11 @@ func (p *Plugin) Configure(ctx context.Context, req *configv1.ConfigureRequest) 
 	defer p.mu.Unlock()
 	p.cfg = cfg
 	p.client = client
-	p.last = cached
+	// Without a valid cache, keep the in-memory last good copy (if any): it
+	// is validated against the new configuration whenever it is used.
+	if cached != nil {
+		p.last = cached
+	}
 	return &configv1.ConfigureResponse{}, nil
 }
 
@@ -170,7 +182,7 @@ func (p *Plugin) MintX509CAAndSubscribe(req *upstreamauthorityv1.MintX509CAReque
 
 	return stream.Send(&upstreamauthorityv1.MintX509CAResponse{
 		X509CaChain:       toPlugin(append([]*x509.Certificate{cert}, a.UpstreamChain()...)),
-		UpstreamX509Roots: toPlugin([]*x509.Certificate{a.Root}),
+		UpstreamX509Roots: toPlugin(a.UpstreamRoots()),
 	})
 }
 
@@ -191,7 +203,22 @@ func (p *Plugin) authority(ctx context.Context, cfg *config, client SecretsClien
 	p.mintMu.Lock()
 	defer p.mintMu.Unlock()
 	log := p.logger()
+	a, err := p.choose(ctx, cfg, client, log)
+	if err != nil {
+		return nil, err
+	}
+	if p.rootInUse != nil && !p.rootInUse.Equal(a.Root) {
+		prev, cur := secret.RootSHA256(p.rootInUse), secret.RootSHA256(a.Root)
+		log.Warn("The upstream root changed", "previous_root_sha256", hex.EncodeToString(prev[:]),
+			"root_sha256", hex.EncodeToString(cur[:]), "subject", a.Root.Subject.String())
+	}
+	p.rootInUse = a.Root
+	return a, nil
+}
 
+// choose returns the fetched intermediate CA if it is valid, else the last
+// good one if that is still valid. mintMu must be held.
+func (p *Plugin) choose(ctx context.Context, cfg *config, client SecretsClient, log hclog.Logger) (*secret.Authority, error) {
 	fetched, err := p.fetch(ctx, cfg, client)
 	if err == nil {
 		err = fetched.Validate(p.validateOptions(cfg))
@@ -265,7 +292,8 @@ func (p *Plugin) validateOptions(cfg *config) secret.ValidateOptions {
 	return secret.ValidateOptions{
 		Now:          p.now(),
 		MinRemaining: cfg.minRemaining,
-		RootSHA256:   cfg.rootSHA256,
+		RootPins:     cfg.rootPins,
+		TrustDomain:  cfg.trustDomain,
 	}
 }
 

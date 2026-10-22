@@ -6,9 +6,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/url"
@@ -184,20 +182,23 @@ func parse[T asn1Cert](t *testing.T, certs []T) []*x509.Certificate {
 	return out
 }
 
-func v1Config(extra string) string {
-	return fmt.Sprintf("region = \"us-east-1\"\nsecret_id = %q\n%s", secretID, extra)
+// anyPin is a root_sha256 for tests that never get as far as a root.
+var anyPin = strings.Repeat("00", 32)
+
+func v1Config(pin, extra string) string {
+	return fmt.Sprintf("region = \"us-east-1\"\nsecret_id = %q\nroot_sha256 = %q\n%s", secretID, pin, extra)
 }
 
-func cacheConfig(t *testing.T) (string, string) {
+func cacheConfig(t *testing.T, pin string) (string, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "cache", "intermediate.json")
-	return path, v1Config(fmt.Sprintf("cache_path = %q\n", path))
+	return path, v1Config(pin, fmt.Sprintf("cache_path = %q\n", path))
 }
 
 func TestConfigureMakesNoAWSCall(t *testing.T) {
 	p := testpki.New(t, testpki.Options{})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	path, hcl := cacheConfig(t)
+	path, hcl := cacheConfig(t, p.PinHex())
 	h.mustConfigure(t, hcl)
 	if n := h.fake.count(); n != 0 {
 		t.Fatalf("Configure made %d Secrets Manager calls, want 0", n)
@@ -211,7 +212,7 @@ func TestConfigureWithAWSUnreachable(t *testing.T) {
 	fake := newFake(nil)
 	fake.fail(errors.New("dial tcp: connection refused"))
 	h := serve(t, fake)
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(anyPin, ""))
 	if n := fake.count(); n != 0 {
 		t.Fatalf("Configure made %d calls", n)
 	}
@@ -220,7 +221,7 @@ func TestConfigureWithAWSUnreachable(t *testing.T) {
 func TestMintFetchesEveryCall(t *testing.T) {
 	p := testpki.New(t, testpki.Options{})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
 	for i := 1; i <= 3; i++ {
 		h.mustMint(t)
 		if n := h.fake.count(); n != i {
@@ -238,7 +239,7 @@ func TestMintFetchesEveryCall(t *testing.T) {
 func TestResponseChainAndRoots(t *testing.T) {
 	p := testpki.New(t, testpki.Options{Middle: 2})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
 	chain, roots := h.mustMint(t)
 
 	want := append([]*x509.Certificate{p.Intermediate.Cert}, p.ChainCerts()...)
@@ -272,7 +273,7 @@ func TestResponseChainAndRoots(t *testing.T) {
 func TestMintedNotAfterCappedAtIntermediate(t *testing.T) {
 	p := testpki.New(t, testpki.Options{IntermediateTTL: 3 * time.Hour})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
 	chain, _, err := h.mint(t, "spiffe://"+trustDomain, 48*time.Hour)
 	if err != nil {
 		t.Fatal(err)
@@ -285,7 +286,7 @@ func TestMintedNotAfterCappedAtIntermediate(t *testing.T) {
 func TestWrongTrustDomainCSRRejected(t *testing.T) {
 	p := testpki.New(t, testpki.Options{})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
 	_, _, err := h.mint(t, "spiffe://other.example.org", time.Hour)
 	if status.Code(err) != codes.Internal || !strings.Contains(err.Error(), "trust domain") {
 		t.Fatalf("mint = %v, want Internal about the trust domain", err)
@@ -294,7 +295,7 @@ func TestWrongTrustDomainCSRRejected(t *testing.T) {
 
 func TestFetchFailureFallsBackToCache(t *testing.T) {
 	p := testpki.New(t, testpki.Options{})
-	path, hcl := cacheConfig(t)
+	path, hcl := cacheConfig(t, p.PinHex())
 
 	// A first plugin fetches and writes the cache.
 	h1 := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
@@ -331,7 +332,7 @@ func TestFetchFailureFallsBackToCache(t *testing.T) {
 func TestFetchFailureFallsBackToMemory(t *testing.T) {
 	p := testpki.New(t, testpki.Options{})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
 	h.mustMint(t)
 	h.fake.fail(errors.New("timeout"))
 	chain, _ := h.mustMint(t)
@@ -343,7 +344,7 @@ func TestFetchFailureFallsBackToMemory(t *testing.T) {
 func TestInvalidSecretFallsBackToLastGood(t *testing.T) {
 	p := testpki.New(t, testpki.Options{})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
 	h.mustMint(t)
 	h.fake.set(secretID, `{"format":"intermediate-ca/v9"}`)
 	chain, _ := h.mustMint(t)
@@ -359,7 +360,7 @@ func TestFetchFailureWithoutCacheFails(t *testing.T) {
 	fake := newFake(nil)
 	fake.fail(errors.New("connection refused"))
 	h := serve(t, fake)
-	_, hcl := cacheConfig(t)
+	_, hcl := cacheConfig(t, anyPin)
 	h.mustConfigure(t, hcl)
 	_, _, err := h.mint(t, "spiffe://"+trustDomain, time.Hour)
 	if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), "connection refused") {
@@ -368,7 +369,7 @@ func TestFetchFailureWithoutCacheFails(t *testing.T) {
 }
 
 func TestCorruptCacheIgnored(t *testing.T) {
-	path, hcl := cacheConfig(t)
+	path, hcl := cacheConfig(t, anyPin)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +392,7 @@ func TestExpiredCacheIgnored(t *testing.T) {
 	// A cache whose intermediate has 30 minutes left, under min_remaining's
 	// default of an hour.
 	p := testpki.New(t, testpki.Options{Now: time.Now().Add(-time.Hour), IntermediateTTL: 91 * time.Minute})
-	_, hcl := cacheConfig(t)
+	_, hcl := cacheConfig(t, p.PinHex())
 	h1 := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
 	h1.mustConfigure(t, hcl+"min_remaining = \"1m\"\n")
 	h1.mustMint(t)
@@ -413,13 +414,13 @@ func TestMinRemaining(t *testing.T) {
 	p := testpki.New(t, testpki.Options{Now: time.Now().Add(-time.Hour), IntermediateTTL: 91 * time.Minute})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
 
-	h.mustConfigure(t, v1Config("min_remaining = \"1h\"\n"))
+	h.mustConfigure(t, v1Config(p.PinHex(), "min_remaining = \"1h\"\n"))
 	_, _, err := h.mint(t, "spiffe://"+trustDomain, time.Hour)
 	if status.Code(err) != codes.Unavailable || !strings.Contains(err.Error(), "min_remaining") {
 		t.Fatalf("mint = %v, want refused for min_remaining", err)
 	}
 
-	h.mustConfigure(t, v1Config("min_remaining = \"10m\"\n"))
+	h.mustConfigure(t, v1Config(p.PinHex(), "min_remaining = \"10m\"\n"))
 	h.mustMint(t)
 }
 
@@ -429,7 +430,7 @@ func TestLastGoodBelowMinRemainingNotUsed(t *testing.T) {
 	p := testpki.New(t, testpki.Options{Now: now, IntermediateTTL: 3 * time.Hour})
 	fake := newFake(map[string]string{secretID: p.V1(t)})
 	h := serveWithClock(t, fake, clock.Now)
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
 	h.mustMint(t)
 
 	fake.fail(errors.New("unreachable"))
@@ -442,24 +443,160 @@ func TestLastGoodBelowMinRemainingNotUsed(t *testing.T) {
 func TestRootPinMismatchRefused(t *testing.T) {
 	p := testpki.New(t, testpki.Options{})
 	other := testpki.New(t, testpki.Options{})
-	sum := sha256.Sum256(other.Root.Cert.Raw)
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	h.mustConfigure(t, v1Config(fmt.Sprintf("root_sha256 = %q\n", hex.EncodeToString(sum[:]))))
+	h.mustConfigure(t, v1Config(other.PinHex(), ""))
 	_, _, err := h.mint(t, "spiffe://"+trustDomain, time.Hour)
 	if err == nil || !strings.Contains(err.Error(), "root_sha256") {
 		t.Fatalf("mint = %v, want refused for the root pin", err)
 	}
 
-	good := sha256.Sum256(p.Root.Cert.Raw)
-	h.mustConfigure(t, v1Config(fmt.Sprintf("root_sha256 = %q\n", strings.ToUpper(hex.EncodeToString(good[:])))))
+	h.mustConfigure(t, v1Config(strings.ToUpper(p.PinHex()), ""))
 	h.mustMint(t)
+}
+
+func TestRootPinRequired(t *testing.T) {
+	h := serve(t, newFake(nil))
+	hcl := fmt.Sprintf("secret_id = %q\n", secretID)
+	if err := h.configure(t, hcl); status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "root_sha256") {
+		t.Fatalf("Configure without root_sha256 = %v, want InvalidArgument", err)
+	}
+	if err := h.configure(t, hcl+"root_sha256 = []\n"); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("Configure with an empty root_sha256 list = %v, want InvalidArgument", err)
+	}
+}
+
+func TestRootPinListStagesARootRotation(t *testing.T) {
+	oldPKI := testpki.New(t, testpki.Options{})
+	newPKI := testpki.New(t, testpki.Options{})
+	h := serve(t, newFake(map[string]string{secretID: oldPKI.V1(t)}))
+	h.mustConfigure(t, fmt.Sprintf("secret_id = %q\nroot_sha256 = [%q, %q]\n", secretID, oldPKI.PinHex(), newPKI.PinHex()))
+	if _, roots := h.mustMint(t); !roots[0].Equal(oldPKI.Root.Cert) {
+		t.Fatal("not the old root")
+	}
+	if strings.Contains(h.log.String(), "The upstream root changed") {
+		t.Fatal("root change reported on the first mint")
+	}
+
+	h.fake.set(secretID, newPKI.V1(t))
+	if _, roots := h.mustMint(t); !roots[0].Equal(newPKI.Root.Cert) {
+		t.Fatal("the new, pinned root was not taken")
+	}
+	if !strings.Contains(h.log.String(), "[WARN]") || !strings.Contains(h.log.String(), "The upstream root changed") {
+		t.Fatalf("no warning about the root change:\n%s", h.log)
+	}
+}
+
+func TestUnpinnedRootFallsBack(t *testing.T) {
+	p := testpki.New(t, testpki.Options{})
+	attacker := testpki.New(t, testpki.Options{})
+	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
+	h.mustMint(t)
+	// Someone who can only PutSecretValue installs their own hierarchy.
+	h.fake.set(secretID, attacker.V1(t))
+	chain, roots := h.mustMint(t)
+	if !chain[1].Equal(p.Intermediate.Cert) || len(roots) != 1 || !roots[0].Equal(p.Root.Cert) {
+		t.Fatal("an unpinned root was used")
+	}
+	if !strings.Contains(h.log.String(), "root_sha256") {
+		t.Fatalf("no warning about the pin:\n%s", h.log)
+	}
+}
+
+func TestUnusableIntermediateKeepsLastGood(t *testing.T) {
+	for name, edit := range map[string]func(*x509.Certificate){
+		"pathlen 0":              testpki.PathLen(0),
+		"trust domain excluded":  testpki.URIConstraints(nil, []string{trustDomain}),
+		"other domain permitted": testpki.URIConstraints([]string{"other.example.org"}, nil),
+	} {
+		t.Run(name, func(t *testing.T) {
+			now := time.Now()
+			p := testpki.New(t, testpki.Options{Now: now})
+			path, hcl := cacheConfig(t, p.PinHex())
+			h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
+			h.mustConfigure(t, hcl)
+			h.mustMint(t)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Same root, but an intermediate SPIRE would reject every CA of.
+			tmpl := testpki.Template("Unusable Intermediate CA", now.Add(-time.Minute), now.Add(90*24*time.Hour), true)
+			edit(tmpl)
+			bad := testpki.Issue(t, &p.Root, tmpl)
+			f := p.V1Fields(t)
+			f["cert"] = testpki.CertPEM(bad.Cert)
+			f["key"] = testpki.KeyPEM(t, bad.Key)
+			h.fake.set(secretID, testpki.Encode(t, f))
+
+			chain, _ := h.mustMint(t)
+			if !chain[1].Equal(p.Intermediate.Cert) {
+				t.Fatal("signed with the unusable intermediate")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatal("the unusable intermediate replaced the cache")
+			}
+			if !strings.Contains(h.log.String(), "would be rejected by SPIRE") {
+				t.Fatalf("no warning with the reason:\n%s", h.log)
+			}
+		})
+	}
+}
+
+func TestProductionShapedIntermediate(t *testing.T) {
+	p := testpki.New(t, testpki.Options{
+		Root: testpki.PathLen(2),
+		Intermediate: testpki.All(testpki.PathLen(1),
+			testpki.URIConstraints([]string{trustDomain}, []string{"." + trustDomain})),
+	})
+	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
+	chain, _ := h.mustMint(t)
+	if !chain[1].Equal(p.Intermediate.Cert) {
+		t.Fatal("wrong intermediate")
+	}
+}
+
+func TestReconfigureKeepsLastGood(t *testing.T) {
+	p := testpki.New(t, testpki.Options{})
+	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
+	h.mustMint(t)
+	h.mustConfigure(t, v1Config(p.PinHex(), "fetch_timeout = \"5s\"\n"))
+	h.fake.fail(errors.New("unreachable"))
+	chain, _ := h.mustMint(t)
+	if !chain[1].Equal(p.Intermediate.Cert) {
+		t.Fatal("reconfiguring dropped the last good intermediate")
+	}
+}
+
+func TestUnknownKeysRejected(t *testing.T) {
+	for _, extra := range []string{"root_sha265 = \"x\"\n", "cache = \"/tmp/x\"\n", "plugin_data { x = 1 }\n"} {
+		h := serve(t, newFake(nil))
+		hcl := v1Config(anyPin, extra)
+		if err := h.configure(t, hcl); status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "unknown configuration keys") {
+			t.Fatalf("Configure with %q = %v, want unknown keys refused", extra, err)
+		}
+		resp, err := h.cfg.Validate(context.Background(), &configv1.ValidateRequest{
+			CoreConfiguration: &configv1.CoreConfiguration{TrustDomain: trustDomain},
+			HclConfiguration:  hcl,
+		})
+		if err != nil || resp.Valid {
+			t.Fatalf("Validate with %q = %v, %v", extra, resp, err)
+		}
+	}
 }
 
 func TestEmergencyRotationPickedUp(t *testing.T) {
 	now := time.Now()
 	p := testpki.New(t, testpki.Options{Now: now})
 	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(p.PinHex(), ""))
 	chain, _ := h.mustMint(t)
 	if !chain[1].Equal(p.Intermediate.Cert) {
 		t.Fatal("first mint did not use the first intermediate")
@@ -486,6 +623,7 @@ func TestEmergencyRotationPickedUp(t *testing.T) {
 
 func TestAWSSecretLayout(t *testing.T) {
 	p := testpki.New(t, testpki.Options{Middle: 1})
+	other := testpki.New(t, testpki.Options{})
 	const (
 		certARN   = "arn:aws:secretsmanager:us-east-1:111122223333:secret:example-cert"
 		keyARN    = "arn:aws:secretsmanager:us-east-1:111122223333:secret:example-key"
@@ -494,10 +632,10 @@ func TestAWSSecretLayout(t *testing.T) {
 	fake := newFake(map[string]string{
 		certARN:   testpki.CertPEM(p.Intermediate.Cert, p.Middle[0].Cert),
 		keyARN:    testpki.KeyPEM(t, p.Intermediate.Key),
-		bundleARN: testpki.CertPEM(p.Root.Cert),
+		bundleARN: testpki.CertPEM(p.Root.Cert, other.Root.Cert),
 	})
 	h := serve(t, fake)
-	h.mustConfigure(t, fmt.Sprintf("cert_file_arn = %q\nkey_file_arn = %q\nbundle_file_arn = %q\n", certARN, keyARN, bundleARN))
+	h.mustConfigure(t, fmt.Sprintf("cert_file_arn = %q\nkey_file_arn = %q\nbundle_file_arn = %q\nroot_sha256 = %q\n", certARN, keyARN, bundleARN, p.PinHex()))
 	if fake.count() != 0 {
 		t.Fatal("Configure called AWS")
 	}
@@ -505,8 +643,12 @@ func TestAWSSecretLayout(t *testing.T) {
 	if fake.count() != 3 {
 		t.Fatalf("%d calls, want 3", fake.count())
 	}
-	if len(chain) != 3 || !chain[1].Equal(p.Intermediate.Cert) || !chain[2].Equal(p.Middle[0].Cert) || !roots[0].Equal(p.Root.Cert) {
-		t.Fatal("wrong chain or roots")
+	if len(chain) != 3 || !chain[1].Equal(p.Intermediate.Cert) || !chain[2].Equal(p.Middle[0].Cert) {
+		t.Fatal("wrong chain")
+	}
+	// The whole bundle is published, as awssecret does.
+	if len(roots) != 2 || !roots[0].Equal(p.Root.Cert) || !roots[1].Equal(other.Root.Cert) {
+		t.Fatalf("roots: %d certificates, want the bundle", len(roots))
 	}
 }
 
@@ -521,7 +663,7 @@ func TestAWSSecretLayoutSelfSigned(t *testing.T) {
 		keyARN:  testpki.KeyPEM(t, p.Root.Key),
 	})
 	h := serve(t, fake)
-	h.mustConfigure(t, fmt.Sprintf("cert_file_arn = %q\nkey_file_arn = %q\n", certARN, keyARN))
+	h.mustConfigure(t, fmt.Sprintf("cert_file_arn = %q\nkey_file_arn = %q\nroot_sha256 = %q\n", certARN, keyARN, p.PinHex()))
 	chain, roots := h.mustMint(t)
 	// As awssecret: the self-signed CA is the root, and only the minted CA
 	// is in the chain.
@@ -545,14 +687,16 @@ func TestConfigValidation(t *testing.T) {
 	for name, hcl := range map[string]string{
 		"malformed":            "secret_id = ",
 		"nothing":              "region = \"us-east-1\"",
-		"both layouts":         v1Config("cert_file_arn = \"a\"\nkey_file_arn = \"b\"\n"),
+		"both layouts":         v1Config(anyPin, "cert_file_arn = \"a\"\nkey_file_arn = \"b\"\n"),
 		"cert without key":     "cert_file_arn = \"a\"",
 		"bundle only":          "bundle_file_arn = \"a\"",
-		"bad pin":              v1Config("root_sha256 = \"abc\"\n"),
-		"bad fetch_timeout":    v1Config("fetch_timeout = \"soon\"\n"),
-		"zero fetch_timeout":   v1Config("fetch_timeout = \"0s\"\n"),
-		"negative remaining":   v1Config("min_remaining = \"-1h\"\n"),
-		"min_remaining string": v1Config("min_remaining = \"1 hour\"\n"),
+		"bad pin":              fmt.Sprintf("secret_id = %q\nroot_sha256 = \"abc\"\n", secretID),
+		"bad pin in a list":    fmt.Sprintf("secret_id = %q\nroot_sha256 = [%q, \"abc\"]\n", secretID, anyPin),
+		"pin not a string":     fmt.Sprintf("secret_id = %q\nroot_sha256 = 1\n", secretID),
+		"bad fetch_timeout":    v1Config(anyPin, "fetch_timeout = \"soon\"\n"),
+		"zero fetch_timeout":   v1Config(anyPin, "fetch_timeout = \"0s\"\n"),
+		"negative remaining":   v1Config(anyPin, "min_remaining = \"-1h\"\n"),
+		"min_remaining string": v1Config(anyPin, "min_remaining = \"1 hour\"\n"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := serve(t, newFake(nil))
@@ -575,14 +719,14 @@ func TestConfigValidation(t *testing.T) {
 	h := serve(t, newFake(nil))
 	_, err := h.cfg.Configure(context.Background(), &configv1.ConfigureRequest{
 		CoreConfiguration: &configv1.CoreConfiguration{},
-		HclConfiguration:  v1Config(""),
+		HclConfiguration:  v1Config(anyPin, ""),
 	})
 	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "trust_domain") {
 		t.Fatalf("Configure without a trust domain = %v", err)
 	}
 	resp, err := h.cfg.Validate(context.Background(), &configv1.ValidateRequest{
 		CoreConfiguration: &configv1.CoreConfiguration{TrustDomain: trustDomain},
-		HclConfiguration:  v1Config("fetch_timeout = \"5s\"\nmin_remaining = \"0s\"\ncache_path = \"/tmp/x\"\nassume_role_arn = \"arn:aws:iam::111122223333:role/example\"\n"),
+		HclConfiguration:  v1Config(anyPin, "fetch_timeout = \"5s\"\nmin_remaining = \"0s\"\ncache_path = \"/tmp/x\"\nassume_role_arn = \"arn:aws:iam::111122223333:role/example\"\n"),
 	})
 	if err != nil || !resp.Valid {
 		t.Fatalf("Validate of a good configuration = %v, %v", resp, err)
@@ -598,7 +742,7 @@ func TestMintBeforeConfigure(t *testing.T) {
 
 func TestUnimplemented(t *testing.T) {
 	h := serve(t, newFake(nil))
-	h.mustConfigure(t, v1Config(""))
+	h.mustConfigure(t, v1Config(anyPin, ""))
 	ctx := context.Background()
 	pub, err := h.ua.PublishJWTKeyAndSubscribe(ctx, &upstreamauthorityv1.PublishJWTKeyRequest{})
 	if err == nil {
@@ -636,7 +780,7 @@ func (c *fakeClock) set(t time.Time) {
 func serveWithClock(t *testing.T, fake *fakeSecrets, now func() time.Time) *harness {
 	t.Helper()
 	h := servePlugin(t, plugin.New(
-		plugin.WithNewClient(func(context.Context, plugin.Config) (plugin.SecretsClient, error) { return fake, nil }),
+		plugin.WithNewClient(func(context.Context, plugin.ClientOptions) (plugin.SecretsClient, error) { return fake, nil }),
 		plugin.WithClock(now),
 	))
 	h.fake = fake
@@ -659,4 +803,14 @@ func servePlugin(t *testing.T, p *plugin.Plugin) *harness {
 		Logger:         hclog.New(&hclog.LoggerOptions{Output: h.log, Level: hclog.Debug}),
 	})
 	return h
+}
+
+func TestJSONConfig(t *testing.T) {
+	p := testpki.New(t, testpki.Options{})
+	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
+	h.mustConfigure(t, fmt.Sprintf(`{"secret_id": %q, "root_sha256": [%q, %q]}`, secretID, anyPin, p.PinHex()))
+	h.mustMint(t)
+	if err := h.configure(t, fmt.Sprintf(`{"secret_id": %q, "root_sha256": %q, "typo": 1}`, secretID, p.PinHex())); status.Code(err) != codes.InvalidArgument {
+		t.Fatalf("JSON with an unknown key = %v", err)
+	}
 }

@@ -7,8 +7,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"math/big"
@@ -46,6 +48,43 @@ type Options struct {
 	IntermediateNotCA bool
 	// CommonName of the intermediate, "Test Intermediate CA" if empty.
 	CommonName string
+	// Root and Intermediate edit the templates of the root and of the
+	// intermediate before they are signed, e.g. with [PathLen] or
+	// [URIConstraints].
+	Root, Intermediate func(*x509.Certificate)
+}
+
+// PathLen sets a CA template's MaxPathLen (0 included).
+func PathLen(n int) func(*x509.Certificate) {
+	return func(c *x509.Certificate) {
+		c.MaxPathLen = n
+		c.MaxPathLenZero = n == 0
+	}
+}
+
+// URIConstraints sets a CA template's critical URI name constraints.
+func URIConstraints(permitted, excluded []string) func(*x509.Certificate) {
+	return func(c *x509.Certificate) {
+		c.PermittedURIDomains = permitted
+		c.ExcludedURIDomains = excluded
+		c.PermittedDNSDomainsCritical = true
+	}
+}
+
+// All applies several template edits in order.
+func All(edits ...func(*x509.Certificate)) func(*x509.Certificate) {
+	return func(c *x509.Certificate) {
+		for _, e := range edits {
+			e(c)
+		}
+	}
+}
+
+func edit(tmpl *x509.Certificate, f func(*x509.Certificate)) *x509.Certificate {
+	if f != nil {
+		f(tmpl)
+	}
+	return tmpl
 }
 
 // New builds a PKI.
@@ -65,14 +104,14 @@ func New(t testing.TB, o Options) *PKI {
 	}
 	notBefore := o.Now.Add(-time.Minute)
 	p := &PKI{}
-	p.Root = Issue(t, nil, Template("Test Root CA", notBefore, notBefore.Add(o.RootTTL), true))
+	p.Root = Issue(t, nil, edit(Template("Test Root CA", notBefore, notBefore.Add(o.RootTTL), true), o.Root))
 	parent := p.Root
 	for range o.Middle {
 		m := Issue(t, &parent, Template("Test Middle CA", notBefore, notBefore.Add(o.RootTTL), true))
 		p.Middle = append(p.Middle, m)
 		parent = m
 	}
-	p.Intermediate = Issue(t, &parent, Template(o.CommonName, notBefore, notBefore.Add(o.IntermediateTTL), !o.IntermediateNotCA))
+	p.Intermediate = Issue(t, &parent, edit(Template(o.CommonName, notBefore, notBefore.Add(o.IntermediateTTL), !o.IntermediateNotCA), o.Intermediate))
 	return p
 }
 
@@ -176,4 +215,15 @@ func Encode(t testing.TB, fields map[string]string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// Pin is the SHA-256 of the root's DER, as root_sha256 takes it.
+func (p *PKI) Pin() []byte {
+	sum := sha256.Sum256(p.Root.Cert.Raw)
+	return sum[:]
+}
+
+// PinHex is [PKI.Pin] in hex.
+func (p *PKI) PinHex() string {
+	return hex.EncodeToString(p.Pin())
 }

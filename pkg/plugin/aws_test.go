@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -32,7 +33,7 @@ func TestNewSecretsManagerClientUsesEndpoint(t *testing.T) {
 	srv := fakesm.New(map[string]string{secretID: "hello"})
 	defer srv.Close()
 
-	client, err := plugin.NewSecretsManagerClient(context.Background(), plugin.Config{Region: "us-east-1", Endpoint: srv.URL})
+	client, err := plugin.NewSecretsManagerClient(context.Background(), plugin.ClientOptions{Region: "us-east-1", Endpoint: srv.URL, Timeout: 5 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -55,7 +56,7 @@ func TestNewSecretsManagerClientUsesEndpoint(t *testing.T) {
 func TestNewSecretsManagerClientAssumeRoleIsLazy(t *testing.T) {
 	isolateAWSEnv(t)
 	// Building a client that assumes a role makes no STS call either.
-	if _, err := plugin.NewSecretsManagerClient(context.Background(), plugin.Config{
+	if _, err := plugin.NewSecretsManagerClient(context.Background(), plugin.ClientOptions{
 		Region:        "us-east-1",
 		AssumeRoleARN: "arn:aws:iam::111122223333:role/example",
 	}); err != nil {
@@ -70,7 +71,7 @@ func TestMintThroughTheAWSSDK(t *testing.T) {
 	defer srv.Close()
 
 	h := servePlugin(t, plugin.New())
-	h.mustConfigure(t, v1Config(fmt.Sprintf("endpoint = %q\n", srv.URL)))
+	h.mustConfigure(t, v1Config(p.PinHex(), fmt.Sprintf("endpoint = %q\n", srv.URL)))
 	if len(srv.Requests()) != 0 {
 		t.Fatal("Configure called Secrets Manager")
 	}
@@ -80,5 +81,41 @@ func TestMintThroughTheAWSSDK(t *testing.T) {
 	}
 	if n := len(srv.Requests()); n != 1 {
 		t.Fatalf("%d requests, want 1", n)
+	}
+}
+
+func TestHungSecretsManagerFallsBackWithinFetchTimeout(t *testing.T) {
+	isolateAWSEnv(t)
+	p := testpki.New(t, testpki.Options{})
+	srv := fakesm.New(map[string]string{secretID: p.V1(t)})
+	defer srv.Close()
+	defer srv.Recover()
+
+	h := servePlugin(t, plugin.New())
+	_, hcl := cacheConfig(t, p.PinHex())
+	h.mustConfigure(t, hcl+fmt.Sprintf("endpoint = %q\nfetch_timeout = \"500ms\"\n", srv.URL))
+	h.mustMint(t)
+
+	srv.Hang()
+	start := time.Now()
+	chain, _ := h.mustMint(t)
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("mint with a hung Secrets Manager took %s, fetch_timeout is 500ms", took)
+	}
+	if !chain[1].Equal(p.Intermediate.Cert) {
+		t.Fatal("did not fall back to the last good intermediate")
+	}
+	if !strings.Contains(h.log.String(), "using the cached copy") {
+		t.Fatalf("no fallback warning:\n%s", h.log)
+	}
+
+	srv.Recover()
+	n := len(srv.Requests())
+	h.mustMint(t)
+	if len(srv.Requests()) <= n {
+		t.Fatal("the mint after recovery did not read Secrets Manager")
+	}
+	if strings.Count(h.log.String(), "using the cached copy") != 1 {
+		t.Fatalf("the mint after recovery fell back again:\n%s", h.log)
 	}
 }

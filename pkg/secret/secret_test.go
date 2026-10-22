@@ -2,19 +2,31 @@ package secret_test
 
 import (
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
+
 	"github.com/bpalermo/spire-upstream-secretsmanager/internal/testpki"
 	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/secret"
 )
 
+var td = spiffeid.RequireTrustDomainFromString("example.org")
+
+// opts validates at now for example.org with a's own root pinned.
+func opts(a *secret.Authority, now time.Time) secret.ValidateOptions {
+	pin := secret.RootSHA256(a.Root)
+	return secret.ValidateOptions{Now: now, MinRemaining: time.Hour, RootPins: [][]byte{pin[:]}, TrustDomain: td}
+}
+
 func validate(a *secret.Authority) error {
-	return a.Validate(secret.ValidateOptions{Now: time.Now(), MinRemaining: time.Hour})
+	if a == nil || a.Root == nil {
+		return a.Validate(secret.ValidateOptions{})
+	}
+	return a.Validate(opts(a, time.Now()))
 }
 
 func TestParseV1(t *testing.T) {
@@ -124,18 +136,81 @@ func TestValidateNotCA(t *testing.T) {
 
 func TestValidateRootPin(t *testing.T) {
 	p := testpki.New(t, testpki.Options{})
+	other := testpki.New(t, testpki.Options{})
 	a, err := secret.ParseV1([]byte(p.V1(t)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	good := sha256.Sum256(p.Root.Cert.Raw)
-	if err := a.Validate(secret.ValidateOptions{Now: time.Now(), RootSHA256: good[:]}); err != nil {
-		t.Fatalf("Validate with the right pin: %v", err)
+	o := opts(a, time.Now())
+	o.RootPins = [][]byte{other.Pin(), p.Pin()}
+	if err := a.Validate(o); err != nil {
+		t.Fatalf("Validate with the pin second in the list: %v", err)
 	}
-	other := testpki.New(t, testpki.Options{})
-	bad := sha256.Sum256(other.Root.Cert.Raw)
-	if err := a.Validate(secret.ValidateOptions{Now: time.Now(), RootSHA256: bad[:]}); err == nil || !strings.Contains(err.Error(), "root_sha256") {
+	o.RootPins = [][]byte{other.Pin()}
+	if err := a.Validate(o); err == nil || !strings.Contains(err.Error(), "root_sha256") {
 		t.Fatalf("Validate with another root's pin = %v, want a pin mismatch", err)
+	}
+	o.RootPins = nil
+	if err := a.Validate(o); err == nil || !strings.Contains(err.Error(), "no root_sha256") {
+		t.Fatalf("Validate without a pin = %v, want refused", err)
+	}
+}
+
+func TestValidateProbe(t *testing.T) {
+	for name, tc := range map[string]struct {
+		o    testpki.Options
+		want string // empty: valid
+	}{
+		"no constraints": {o: testpki.Options{}},
+		"production shape": {o: testpki.Options{
+			Root: testpki.PathLen(2),
+			Intermediate: testpki.All(testpki.PathLen(1),
+				testpki.URIConstraints([]string{"example.org"}, []string{".example.org"})),
+		}},
+		"intermediate pathlen 0": {
+			o:    testpki.Options{Intermediate: testpki.PathLen(0)},
+			want: "would be rejected by SPIRE",
+		},
+		"root pathlen 1 with a middle CA": {
+			o:    testpki.Options{Root: testpki.PathLen(1), Middle: 1},
+			want: "would be rejected by SPIRE",
+		},
+		"trust domain excluded": {
+			o:    testpki.Options{Intermediate: testpki.URIConstraints(nil, []string{"example.org"})},
+			want: "would be rejected by SPIRE",
+		},
+		"other trust domain permitted": {
+			o:    testpki.Options{Intermediate: testpki.URIConstraints([]string{"other.example.org"}, nil)},
+			want: "would be rejected by SPIRE",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := testpki.New(t, tc.o)
+			a, err := secret.ParseV1([]byte(p.V1(t)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = validate(a)
+			switch {
+			case tc.want == "" && err != nil:
+				t.Fatalf("Validate: %v", err)
+			case tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)):
+				t.Fatalf("Validate = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateRequiresTrustDomain(t *testing.T) {
+	p := testpki.New(t, testpki.Options{})
+	a, err := secret.ParseV1([]byte(p.V1(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := opts(a, time.Now())
+	o.TrustDomain = spiffeid.TrustDomain{}
+	if err := a.Validate(o); err == nil {
+		t.Fatal("validated without a trust domain")
 	}
 }
 
@@ -146,15 +221,20 @@ func TestValidateMinRemaining(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := a.Validate(secret.ValidateOptions{Now: now, MinRemaining: time.Hour}); err != nil {
+	if err := a.Validate(withMin(opts(a, now), time.Hour)); err != nil {
 		t.Fatalf("1h59m left, min 1h: %v", err)
 	}
-	if err := a.Validate(secret.ValidateOptions{Now: now, MinRemaining: 3 * time.Hour}); err == nil || !strings.Contains(err.Error(), "min_remaining") {
+	if err := a.Validate(withMin(opts(a, now), 3*time.Hour)); err == nil || !strings.Contains(err.Error(), "min_remaining") {
 		t.Fatalf("1h59m left, min 3h = %v, want rejected", err)
 	}
-	if err := a.Validate(secret.ValidateOptions{Now: now.Add(3 * time.Hour)}); err == nil {
+	if err := a.Validate(withMin(opts(a, now.Add(3*time.Hour)), 0)); err == nil {
 		t.Fatal("expired certificate accepted")
 	}
+}
+
+func withMin(o secret.ValidateOptions, d time.Duration) secret.ValidateOptions {
+	o.MinRemaining = d
+	return o
 }
 
 func TestMarshalV1RoundTrip(t *testing.T) {
@@ -198,6 +278,29 @@ func TestAWSSecretLayout(t *testing.T) {
 		}
 		if !a.Root.Equal(p.Root.Cert) || len(a.Chain) != 1 {
 			t.Fatal("wrong root or chain")
+		}
+		// The whole bundle is published, and survives the cache encoding.
+		if roots := a.UpstreamRoots(); len(roots) != 2 || !roots[0].Equal(other.Root.Cert) || !roots[1].Equal(p.Root.Cert) {
+			t.Fatalf("upstream roots: %d", len(roots))
+		}
+		b, err := a.MarshalV1()
+		if err != nil {
+			t.Fatal(err)
+		}
+		cached, err := secret.ParseCache(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cached.UpstreamRoots()) != 2 || validate(cached) != nil {
+			t.Fatal("the cache lost the bundle")
+		}
+		// A secret cannot smuggle extra roots in through that field.
+		fromSecret, err := secret.ParseV1(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(fromSecret.UpstreamRoots()) != 1 {
+			t.Fatal("ParseV1 read x_upstream_bundle")
 		}
 	})
 

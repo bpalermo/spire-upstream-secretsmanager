@@ -8,10 +8,20 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spiffe/go-spiffe/v2/spiffeid"
+
 	"github.com/bpalermo/spire-upstream-secretsmanager/internal/testpki"
 	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/cache"
 	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/secret"
 )
+
+var td = spiffeid.RequireTrustDomainFromString("example.org")
+
+// vo validates for example.org at now with a's root pinned.
+func vo(a *secret.Authority, now time.Time, minRemaining time.Duration) secret.ValidateOptions {
+	pin := secret.RootSHA256(a.Root)
+	return secret.ValidateOptions{Now: now, MinRemaining: minRemaining, RootPins: [][]byte{pin[:]}, TrustDomain: td}
+}
 
 func authority(t *testing.T, o testpki.Options) *secret.Authority {
 	t.Helper()
@@ -52,7 +62,7 @@ func TestSaveIsAtomicAndPrivate(t *testing.T) {
 		t.Fatalf("directory holds %d entries, want only the cache (no temporary file left)", len(entries))
 	}
 
-	got, err := cache.Load(path, secret.ValidateOptions{Now: time.Now(), MinRemaining: time.Hour})
+	got, err := cache.Load(path, vo(a, time.Now(), time.Hour))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
@@ -76,7 +86,7 @@ func TestSaveCreatesDirectory(t *testing.T) {
 }
 
 func TestLoadMissing(t *testing.T) {
-	_, err := cache.Load(filepath.Join(t.TempDir(), "none.json"), secret.ValidateOptions{Now: time.Now()})
+	_, err := cache.Load(filepath.Join(t.TempDir(), "none.json"), secret.ValidateOptions{Now: time.Now(), TrustDomain: td})
 	if !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("Load = %v, want ErrNotExist", err)
 	}
@@ -87,21 +97,37 @@ func TestLoadCorrupt(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"format":"intermediate-ca/v1","cert":"x"`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Load(path, secret.ValidateOptions{Now: time.Now()}); err == nil {
+	if _, err := cache.Load(path, secret.ValidateOptions{Now: time.Now(), TrustDomain: td}); err == nil {
 		t.Fatal("corrupt cache accepted")
+	}
+}
+
+func TestLoadUnpinnedOrUnusable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	other := authority(t, testpki.Options{})
+	a := authority(t, testpki.Options{Intermediate: testpki.PathLen(0)})
+	if err := cache.Save(path, a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.Load(path, vo(other, time.Now(), 0)); err == nil {
+		t.Fatal("cache under an unpinned root accepted")
+	}
+	if _, err := cache.Load(path, vo(a, time.Now(), 0)); err == nil {
+		t.Fatal("cache with an intermediate that cannot sign a SPIRE CA accepted")
 	}
 }
 
 func TestLoadExpired(t *testing.T) {
 	now := time.Now()
 	path := filepath.Join(t.TempDir(), "cache.json")
-	if err := cache.Save(path, authority(t, testpki.Options{Now: now, IntermediateTTL: 2 * time.Hour})); err != nil {
+	a := authority(t, testpki.Options{Now: now, IntermediateTTL: 2 * time.Hour})
+	if err := cache.Save(path, a); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := cache.Load(path, secret.ValidateOptions{Now: now.Add(3 * time.Hour)}); err == nil {
+	if _, err := cache.Load(path, vo(a, now.Add(3*time.Hour), 0)); err == nil {
 		t.Fatal("expired cache accepted")
 	}
-	if _, err := cache.Load(path, secret.ValidateOptions{Now: now, MinRemaining: 3 * time.Hour}); err == nil {
+	if _, err := cache.Load(path, vo(a, now, 3*time.Hour)); err == nil {
 		t.Fatal("cache with less than min_remaining left accepted")
 	}
 }

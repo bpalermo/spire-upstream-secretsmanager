@@ -11,6 +11,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"flag"
 	"fmt"
@@ -111,7 +112,8 @@ func freePort(t *testing.T) int {
 func TestSPIREServerUsesThePlugin(t *testing.T) {
 	server, plugin := rlocation(t, *spireServer), rlocation(t, *pluginBin)
 
-	p := testpki.New(t, testpki.Options{Middle: 1})
+	now := time.Now()
+	p := testpki.New(t, testpki.Options{Now: now, Middle: 1})
 	sm := fakesm.New(map[string]string{secretID: p.V1(t)})
 	defer sm.Close()
 
@@ -124,69 +126,138 @@ func TestSPIREServerUsesThePlugin(t *testing.T) {
 	t.Cleanup(func() { _ = os.RemoveAll(sockDir) })
 	socket := filepath.Join(sockDir, "api.sock")
 	cachePath := filepath.Join(dir, "cache", "intermediate.json")
-	rootSum := sha256.Sum256(p.Root.Cert.Raw)
 
 	conf := filepath.Join(dir, "server.conf")
 	if err := os.WriteFile(conf, fmt.Appendf(nil, serverConf,
 		freePort(t), socket, filepath.Join(dir, "data"), filepath.Join(dir, "datastore.sqlite3"),
-		plugin, sha256File(t, plugin), sm.URL, secretID, cachePath, hex.EncodeToString(rootSum[:]),
+		plugin, sha256File(t, plugin), sm.URL, secretID, cachePath, p.PinHex(),
 	), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
+	s := &spire{t: t, ctx: ctx, bin: server, conf: conf, socket: socket, dir: dir}
 
-	var logs bytes.Buffer
-	cmd := exec.CommandContext(ctx, server, "run", "-config", conf)
-	cmd.Env = awsEnv()
-	cmd.Stdout = &logs
-	cmd.Stderr = &logs
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
-		if t.Failed() || testing.Verbose() {
-			t.Logf("spire-server output:\n%s", logs.String())
-		}
-	})
-
-	waitHealthy(ctx, t, server, socket)
-
-	out, err := exec.CommandContext(ctx, server, "bundle", "show", "-socketPath", socket, "-format", "pem").CombinedOutput()
-	if err != nil {
-		t.Fatalf("bundle show: %v\n%s", err, out)
-	}
-	bundle := parsePEM(t, out)
+	// 1. Start, mint from Secrets Manager.
+	s.start()
+	bundle := parsePEM(t, s.run("bundle", "show", "-format", "pem"))
 	if len(bundle) != 1 || !bundle[0].Equal(p.Root.Cert) {
-		t.Fatalf("bundle has %d certificates; want only the upstream root\n%s", len(bundle), out)
+		t.Fatalf("bundle has %d certificates; want only the upstream root", len(bundle))
 	}
-
-	// An X509-SVID the server mints chains to the root through its CA and
-	// the intermediate from Secrets Manager.
-	svidDir := filepath.Join(dir, "svid")
-	if err := os.Mkdir(svidDir, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	out, err = exec.CommandContext(ctx, server, "x509", "mint", "-socketPath", socket,
-		"-spiffeID", "spiffe://example.org/test", "-write", svidDir).CombinedOutput()
-	if err != nil {
-		t.Fatalf("x509 mint: %v\n%s", err, out)
-	}
-	svid, err := os.ReadFile(filepath.Join(svidDir, "svid.pem"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	verifyChain(t, parsePEM(t, svid), p)
-
+	verifyChain(t, s.mintSVID(), p.Root.Cert, p.Intermediate.Cert)
 	if reqs := sm.Requests(); len(reqs) == 0 || reqs[0].SecretID != secretID || reqs[0].VersionStage != "AWSCURRENT" {
 		t.Fatalf("Secrets Manager requests = %+v", reqs)
 	}
 	if st, err := os.Stat(cachePath); err != nil || st.Mode().Perm() != 0o600 {
 		t.Fatalf("cache: %v, %v", st, err)
 	}
+
+	// 2. Rotate the intermediate in Secrets Manager and make SPIRE prepare
+	// its next CA: the new intermediate signs it.
+	next := testpki.Issue(t, &p.Middle[0], testpki.Template("Test Intermediate CA 2", now.Add(-time.Minute), now.Add(90*24*time.Hour), true))
+	f := p.V1Fields(t)
+	f["cert"] = testpki.CertPEM(next.Cert)
+	f["key"] = testpki.KeyPEM(t, next.Key)
+	sm.Set(secretID, testpki.Encode(t, f))
+	before := len(sm.Requests())
+	var prepared struct {
+		PreparedAuthority struct {
+			UpstreamAuthoritySubjectKeyID string `json:"upstream_authority_subject_key_id"`
+		} `json:"prepared_authority"`
+	}
+	out := s.run("localauthority", "x509", "prepare", "-output", "json")
+	if err := json.Unmarshal(out, &prepared); err != nil {
+		t.Fatalf("localauthority x509 prepare: %v\n%s", err, out)
+	}
+	if got, want := prepared.PreparedAuthority.UpstreamAuthoritySubjectKeyID, hex.EncodeToString(next.Cert.SubjectKeyId); got != want {
+		t.Fatalf("prepared CA's upstream authority is %s, want the new intermediate %s\n%s", got, want, out)
+	}
+	if len(sm.Requests()) <= before {
+		t.Fatal("prepare did not read Secrets Manager")
+	}
+
+	// 3. Restart with Secrets Manager gone: the server starts, and mints
+	// with the cached (new) intermediate.
+	s.stop()
+	sm.Close()
+	s.start()
+	verifyChain(t, s.mintSVID(), p.Root.Cert, next.Cert)
+	if !strings.Contains(s.logs.String(), "using the cached copy") {
+		t.Fatal("the restarted server did not fall back to the cache")
+	}
+}
+
+// spire runs a SPIRE server and its CLI.
+type spire struct {
+	t                 *testing.T
+	ctx               context.Context
+	bin, conf, socket string
+	dir               string
+	cmd               *exec.Cmd
+	logs              bytes.Buffer
+	svids             int
+}
+
+func (s *spire) start() {
+	s.t.Helper()
+	s.logs.Reset()
+	s.cmd = exec.CommandContext(s.ctx, s.bin, "run", "-config", s.conf)
+	s.cmd.Env = awsEnv()
+	s.cmd.Stdout = &s.logs
+	s.cmd.Stderr = &s.logs
+	if err := s.cmd.Start(); err != nil {
+		s.t.Fatal(err)
+	}
+	cmd := s.cmd
+	s.t.Cleanup(func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	s.t.Cleanup(func() {
+		if cmd == s.cmd && (s.t.Failed() || testing.Verbose()) {
+			s.t.Logf("spire-server output:\n%s", s.logs.String())
+		}
+	})
+	waitHealthy(s.ctx, s.t, s.bin, s.socket)
+}
+
+func (s *spire) stop() {
+	s.t.Helper()
+	if s.t.Failed() || testing.Verbose() {
+		s.t.Logf("spire-server output:\n%s", s.logs.String())
+	}
+	_ = s.cmd.Process.Signal(os.Interrupt)
+	_ = s.cmd.Wait()
+}
+
+// run runs a spire-server CLI command against the server.
+func (s *spire) run(args ...string) []byte {
+	s.t.Helper()
+	args = append(args, "-socketPath", s.socket)
+	out, err := exec.CommandContext(s.ctx, s.bin, args...).CombinedOutput()
+	if err != nil {
+		s.t.Fatalf("spire-server %v: %v\n%s", args, err, out)
+	}
+	return out
+}
+
+// mintSVID mints an X509-SVID and returns it with its intermediates.
+func (s *spire) mintSVID() []*x509.Certificate {
+	s.t.Helper()
+	s.svids++
+	dir := filepath.Join(s.dir, fmt.Sprintf("svid%d", s.svids))
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		s.t.Fatal(err)
+	}
+	s.run("x509", "mint", "-spiffeID", "spiffe://example.org/test", "-write", dir)
+	b, err := os.ReadFile(filepath.Join(dir, "svid.pem"))
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return parsePEM(s.t, b)
 }
 
 // awsEnv is the environment of the SPIRE server, and so of the plugin: static
@@ -224,8 +295,8 @@ func waitHealthy(ctx context.Context, t *testing.T, server, socket string) {
 }
 
 // verifyChain checks that chain (an SVID followed by its intermediates)
-// verifies to the PKI's root and goes through its intermediate.
-func verifyChain(t *testing.T, chain []*x509.Certificate, p *testpki.PKI) {
+// verifies to root and goes through intermediate.
+func verifyChain(t *testing.T, chain []*x509.Certificate, root, intermediate *x509.Certificate) {
 	t.Helper()
 	if len(chain) < 2 {
 		t.Fatalf("SVID chain has %d certificates", len(chain))
@@ -235,17 +306,17 @@ func verifyChain(t *testing.T, chain []*x509.Certificate, p *testpki.PKI) {
 		intermediates.AddCert(c)
 	}
 	roots := x509.NewCertPool()
-	roots.AddCert(p.Root.Cert)
+	roots.AddCert(root)
 	paths, err := chain[0].Verify(x509.VerifyOptions{Intermediates: intermediates, Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}})
 	if err != nil {
 		t.Fatalf("SVID does not verify to the root: %v", err)
 	}
 	for _, c := range paths[0] {
-		if c.Equal(p.Intermediate.Cert) {
+		if c.Equal(intermediate) {
 			return
 		}
 	}
-	t.Fatal("SVID chain does not go through the intermediate from Secrets Manager")
+	t.Fatalf("SVID chain does not go through %q", intermediate.Subject)
 }
 
 func parsePEM(t *testing.T, b []byte) []*x509.Certificate {

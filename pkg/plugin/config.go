@@ -4,9 +4,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/hashicorp/hcl"
+	"github.com/hashicorp/hcl/hcl/token"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
 )
@@ -37,8 +41,9 @@ type Config struct {
 	// CachePath is where the last good intermediate CA is kept.
 	CachePath string `hcl:"cache_path" json:"cache_path"`
 
-	// RootSHA256 is the hex SHA-256 of the DER of the only root accepted.
-	RootSHA256 string `hcl:"root_sha256" json:"root_sha256"`
+	// RootSHA256 is the hex SHA-256 of the DER of the root accepted, or a
+	// list of them (to stage a root rotation). Required.
+	RootSHA256 any `hcl:"root_sha256" json:"root_sha256"`
 
 	// FetchTimeout bounds the Secrets Manager reads of one mint.
 	FetchTimeout string `hcl:"fetch_timeout" json:"fetch_timeout"`
@@ -46,13 +51,17 @@ type Config struct {
 	// MinRemaining is the least lifetime an intermediate CA must have left
 	// to be used.
 	MinRemaining string `hcl:"min_remaining" json:"min_remaining"`
+
+	// UnusedKeys collects the keys HCL did not decode, which are refused:
+	// a misspelt key (root_sha265) must not silently disable a check.
+	UnusedKeys map[string][]token.Pos `hcl:",unusedKeyPositions" json:"-"`
 }
 
 // config is a parsed and validated Config.
 type config struct {
 	Config
 	trustDomain  spiffeid.TrustDomain
-	rootSHA256   []byte
+	rootPins     [][]byte
 	fetchTimeout time.Duration
 	minRemaining time.Duration
 }
@@ -65,6 +74,10 @@ func buildConfig(core *configv1.CoreConfiguration, hclText string) (*config, err
 		return nil, fmt.Errorf("plugin configuration is malformed: %w", err)
 	}
 	var errs []error
+	if len(c.UnusedKeys) > 0 {
+		keys := slices.Sorted(maps.Keys(c.UnusedKeys))
+		errs = append(errs, fmt.Errorf("unknown configuration keys: %s", strings.Join(keys, ", ")))
+	}
 	if core == nil || core.TrustDomain == "" {
 		errs = append(errs, errors.New("server core configuration must contain trust_domain"))
 	} else {
@@ -76,7 +89,7 @@ func buildConfig(core *configv1.CoreConfiguration, hclText string) (*config, err
 	}
 	errs = append(errs, c.validateSource()...)
 	var err error
-	if c.rootSHA256, err = parsePin(c.RootSHA256); err != nil {
+	if c.rootPins, err = parsePins(c.RootSHA256); err != nil {
 		errs = append(errs, err)
 	}
 	if c.fetchTimeout, err = parseDuration("fetch_timeout", c.FetchTimeout, defaultFetchTimeout, false); err != nil {
@@ -113,15 +126,39 @@ func (c *config) validateSource() []error {
 	return errs
 }
 
-func parsePin(s string) ([]byte, error) {
-	if s == "" {
-		return nil, nil
+// parsePins parses root_sha256: one hex SHA-256 or a list of them. At least
+// one is required.
+func parsePins(v any) ([][]byte, error) {
+	var hexes []string
+	switch v := v.(type) {
+	case nil:
+	case string:
+		hexes = []string{v}
+	case []any:
+		for _, e := range v {
+			s, ok := e.(string)
+			if !ok {
+				return nil, errors.New("'root_sha256' must be a string or a list of strings")
+			}
+			hexes = append(hexes, s)
+		}
+	case []string:
+		hexes = v
+	default:
+		return nil, errors.New("'root_sha256' must be a string or a list of strings")
 	}
-	b, err := hex.DecodeString(s)
-	if err != nil || len(b) != 32 {
-		return nil, fmt.Errorf("'root_sha256' must be 64 hex characters, the SHA-256 of the root certificate's DER")
+	if len(hexes) == 0 {
+		return nil, errors.New("configuration missing 'root_sha256': the hex SHA-256 of the root certificate's DER (or a list of them) is required")
 	}
-	return b, nil
+	pins := make([][]byte, 0, len(hexes))
+	for _, h := range hexes {
+		b, err := hex.DecodeString(strings.TrimSpace(h))
+		if err != nil || len(b) != 32 {
+			return nil, fmt.Errorf("'root_sha256' value %q must be 64 hex characters, the SHA-256 of the root certificate's DER", h)
+		}
+		pins = append(pins, b)
+	}
+	return pins, nil
 }
 
 func parseDuration(name, s string, def time.Duration, zeroOK bool) (time.Duration, error) {

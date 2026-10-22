@@ -20,7 +20,7 @@ import (
 	upstreamauthorityv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/plugin/server/upstreamauthority/v1"
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
 
-	"github.com/bpalermo/spire-upstream-secretsmanager/common/version"
+	"github.com/bpalermo/spire-upstream-secretsmanager/internal/version"
 	"github.com/bpalermo/spire-upstream-secretsmanager/plugin"
 )
 

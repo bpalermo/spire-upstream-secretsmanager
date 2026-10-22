@@ -129,7 +129,7 @@ verifiers (SPIRE agents, go-spiffe workloads).
 
 ## Kubernetes image volume (the plugin's own image)
 
-The plugin image (`//:image_index`, the binary
+The plugin image (`//upstream-secretsmanager:image_index`, the binary
 alone at `/upstream-secretsmanager`, one `tar+zstd` layer per platform) as an
 `image:` volume in a throwaway kind cluster:
 

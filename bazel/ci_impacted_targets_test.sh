@@ -17,16 +17,25 @@ trap 'rm -rf "${work}"' EXIT
 # The candidate lists, as the queries would answer them: the buildable rules
 # (no `manual` rule, so no //:gazelle) and the tests `bazel test //...` runs.
 cat >"${work}/rules.txt" <<'EOF'
-//:image_load
-//:image_push
-//:upstream-secretsmanager
-//:spire-upstream-secretsmanager_test
-//common/version:version
-//common/version:version_test
+//integration/e2e:e2e_test
+//internal/version:version
+//internal/version:version_test
+//intermediateca/v1:generated_test
+//intermediateca/v1:intermediateca
+//rotator:rotator
+//rotator:rotator_test
+//rotator:zip_linux_amd64
+//upstream-secretsmanager:image_load
+//upstream-secretsmanager:image_push
+//upstream-secretsmanager:upstream-secretsmanager
+//upstream-secretsmanager:upstream-secretsmanager_test
 EOF
 cat >"${work}/tests.txt" <<'EOF'
-//:spire-upstream-secretsmanager_test
-//common/version:version_test
+//integration/e2e:e2e_test
+//internal/version:version_test
+//intermediateca/v1:generated_test
+//rotator:rotator_test
+//upstream-secretsmanager:upstream-secretsmanager_test
 EOF
 
 fail=0
@@ -75,24 +84,48 @@ check_flag() { # case name got want
 # flag false, and it is the classification saying so, not a failure.
 expect nothing "" "" ""
 
-# A change to the root package: its library, binary, test and
-# image. Source-file labels (//:main.go) and a
-# `manual` rule (//:gazelle) are in no candidate list and are dropped.
-expect binary "//:gazelle
-//:image_index
-//:image_load
-//:image_push
-//:main.go
-//:upstream-secretsmanager
-//:spire-upstream-secretsmanager_test
-" "//:image_load
-//:image_push
-//:upstream-secretsmanager
-//:spire-upstream-secretsmanager_test" "//:spire-upstream-secretsmanager_test"
+# A change to the plugin's main package: its library, binary, test and
+# image, and the end-to-end test that runs the binary. Source-file labels
+# (main.go), a rule in no candidate list (image_index) and a `manual` rule
+# (//:gazelle) are dropped.
+expect plugin "//:gazelle
+//integration/e2e:e2e_test
+//upstream-secretsmanager:image_index
+//upstream-secretsmanager:image_load
+//upstream-secretsmanager:image_push
+//upstream-secretsmanager:main.go
+//upstream-secretsmanager:upstream-secretsmanager
+//upstream-secretsmanager:upstream-secretsmanager_test
+" "//integration/e2e:e2e_test
+//upstream-secretsmanager:image_load
+//upstream-secretsmanager:image_push
+//upstream-secretsmanager:upstream-secretsmanager
+//upstream-secretsmanager:upstream-secretsmanager_test" "//integration/e2e:e2e_test
+//upstream-secretsmanager:upstream-secretsmanager_test"
+
+# A change to the Lambda: its binary, zip and test, and the end-to-end test
+# that runs its rotation code; nothing of the plugin.
+expect rotator "//integration/e2e:e2e_test
+//rotator:main.go
+//rotator:rotator
+//rotator:rotator_test
+//rotator:zip_linux_amd64
+" "//integration/e2e:e2e_test
+//rotator:rotator
+//rotator:rotator_test
+//rotator:zip_linux_amd64" "//integration/e2e:e2e_test
+//rotator:rotator_test"
+
+# A change to the secret format's proto: the generated-code freshness test
+# runs; the manual generator (//intermediateca/v1:generate) is dropped.
+expect proto "//intermediateca/v1:generate
+//intermediateca/v1:generated_test
+//intermediateca/v1:secret.proto
+" "//intermediateca/v1:generated_test" "//intermediateca/v1:generated_test"
 
 # A rule that is not a test: built, nothing tested.
-expect image "//:image_load
-" "//:image_load" ""
+expect image "//upstream-secretsmanager:image_load
+" "//upstream-secretsmanager:image_load" ""
 
 # Labels in no candidate list (an external target, a removed-looking label):
 # nothing to build, and still a classification.
@@ -100,13 +133,13 @@ expect foreign "@rules_go//go:def.bzl
 //gone:gone
 " "" ""
 
-# An impacted label is matched whole: //common/version:version is not matched
-# by the prefix of //common/version:version_test, and the reverse.
-expect whole "//common/version:version
-" "//common/version:version" ""
+# An impacted label is matched whole: //internal/version:version is not
+# matched by the prefix of //internal/version:version_test, and the reverse.
+expect whole "//internal/version:version
+" "//internal/version:version" ""
 
 # classify fails, rather than answering, when a candidate list is unreadable.
-if classify "${work}/binary/impacted.txt" "${work}/missing.txt" "${work}/tests.txt" "${work}/binary" 2>/dev/null; then
+if classify "${work}/plugin/impacted.txt" "${work}/missing.txt" "${work}/tests.txt" "${work}/plugin" 2>/dev/null; then
 	echo "FAIL: classify succeeded with a missing candidate list" >&2
 	fail=1
 fi

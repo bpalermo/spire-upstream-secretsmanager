@@ -1,0 +1,17 @@
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# The generator and the freshness test of the committed .pb.go files
+# (defs.bzl): every proto package uses these two scripts.
+exports_files(
+    [
+        "generate.sh",
+        "generated_test.sh",
+    ],
+    visibility = ["//:__subpackages__"],
+)
+
+# For the shellcheck aspect (--config=lint).
+sh_library(
+    name = "scripts",
+    srcs = glob(["*.sh"]),
+)

@@ -5,7 +5,7 @@ load("//verifiers:defs.bzl", "DOCKER_TEST_TAGS")
 # index with every blob, as built.
 filegroup(
     name = "plugin_oci_tarball",
-    srcs = ["//:image_index"],
+    srcs = ["//upstream-secretsmanager:image_index"],
     output_group = "oci_tarball",
 )
 

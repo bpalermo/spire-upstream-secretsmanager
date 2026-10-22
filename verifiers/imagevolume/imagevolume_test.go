@@ -7,7 +7,7 @@
 // exec it, and which subPath forms work. CRI-O is not covered: kind nodes run
 // containerd only.
 //
-// The image is the repository's //:image_index, as
+// The image is the repository's //upstream-secretsmanager:image_index, as
 // the OCI layout tarball rules_img builds; it is imported into the node's
 // containerd with `ctr images import --all-platforms`, so its blobs, zstd
 // layer included, reach containerd as built (no registry, no conversion).

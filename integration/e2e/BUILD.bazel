@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# The rotator's rotation code rotates an intermediate CA into a fake Secrets
+# Manager, and the SPIRE server release pinned in MODULE.bazel, with the
+# plugin as its UpstreamAuthority, mints from it; then a second rotation is
+# picked up. No network: every AWS service is an in-process fake.
+go_test(
+    name = "e2e_test",
+    size = "medium",
+    srcs = ["e2e_test.go"],
+    args = [
+        "--spire_server=$(rlocationpath //integration/spireserver:spire_server)",
+        "--plugin=$(rlocationpath //upstream-secretsmanager)",
+    ],
+    data = [
+        "//integration/spireserver:spire_server",
+        "//upstream-secretsmanager",
+    ],
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//config",
+        "//intermediateca",
+        "//internal/fakesm",
+        "//internal/kmsfake",
+        "//internal/spiretest",
+        "//internal/testpki",
+        "//kmssigner",
+        "//rotation",
+        "@com_github_aws_aws_sdk_go_v2//aws",
+        "@com_github_aws_aws_sdk_go_v2_credentials//:credentials",
+        "@com_github_aws_aws_sdk_go_v2_service_secretsmanager//:secretsmanager",
+    ],
+)

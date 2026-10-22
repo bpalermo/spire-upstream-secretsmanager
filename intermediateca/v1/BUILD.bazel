@@ -1,0 +1,33 @@
+load("@rules_go//go:def.bzl", "go_library")
+load("//bazel/proto:defs.bzl", "committed_go_proto")
+
+# secret.pb.go is generated from secret.proto and COMMITTED, so that `go get`
+# of this package works without Bazel or protoc, and the build uses the
+# committed file too (the go_library below). Gazelle therefore generates no
+# proto rules here, only the go_library of the committed .go file; the
+# proto_library, the generator and its checks are bazel/proto/defs.bzl's.
+#
+#   bazel run //intermediateca/v1:generate          regenerates secret.pb.go
+#   bazel test //intermediateca/v1:generated_test   fails if it is stale
+#
+# gazelle:proto disable
+
+committed_go_proto(
+    name = "secret_proto",
+    src = "secret.proto",
+    go_deps = ["@build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/intermediateca/v1",
+    deps = ["@protovalidate//proto/protovalidate/buf/validate:validate_proto"],
+)
+
+go_library(
+    name = "intermediateca",
+    srcs = ["secret.pb.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/intermediateca/v1",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@build_buf_gen_go_bufbuild_protovalidate_protocolbuffers_go//buf/validate",
+        "@org_golang_google_protobuf//reflect/protoreflect",
+        "@org_golang_google_protobuf//runtime/protoimpl",
+    ],
+)

@@ -21,21 +21,30 @@ concurrency:
 # trusted build consumes. Gated on the ref rather than the event, because
 # workflow_dispatch can target any branch.
 #
+# One workflow for the three components of this repository: the plugin
+# (//upstream-secretsmanager), the rotator Lambda (//rotator) and the secret
+# format (//intermediateca), which are built, tested and released together.
+#
 # Target determination: `diff` computes, with bazel-diff, the targets this
 # change impacts (bazel/ci-impacted-targets.sh) and hands `build` the lists to
-# build and test from; `build` is skipped when nothing is impacted. The checks that cover
-# the whole tree cheaply (the formatter, Gazelle) run every time, in `lint`.
-# Anything bazel-diff cannot decide (no base, an error) is a full run.
+# build and test from; `build` is skipped when nothing is impacted. The checks
+# that cover the whole tree cheaply (the formatter, Gazelle, buf lint, buf
+# breaking, the freshness of the committed generated code) run every time, in
+# `lint`. Anything bazel-diff cannot decide (no base, an error) is a full run.
 jobs:
-  # The whole-tree checks that cost no build of consequence: the formatter and
-  # the BUILD files' freshness. Unconditional, so a change bazel-diff scopes
-  # down to nothing is still formatted and generated right.
+  # The whole-tree checks that cost no build of consequence: the formatter,
+  # the BUILD files' freshness and the protos. Unconditional, so a change
+  # bazel-diff scopes down to nothing is still formatted, generated and
+  # compatible.
   lint:
     name: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          # The whole history: the protos are compared with the commit this
+          # one is based on.
+          fetch-depth: 0
           persist-credentials: false
 
       # No version is pinned here: bazelisk reads .bazelversion, so the
@@ -47,14 +56,14 @@ jobs:
           repository-cache: true
           cache-save: ${{ github.ref == 'refs/heads/main' }}
 
-      # Starlark (with buildifier's lint warnings), Go and shell. The loop is
-      # there because a language whose formatter did not run reports nothing,
-      # which looks the same as clean.
+      # Starlark (with buildifier's lint warnings), Go, shell and protos. The
+      # loop is there because a language whose formatter did not run reports
+      # nothing, which looks the same as clean.
       - name: Everything is formatted
         run: |
           out="$(bazel run --config=ci //:format.check 2>&1)" || { echo "${out}"; echo "::error::run 'bazel run //:format'" >&2; exit 1; }
           echo "${out}"
-          for language in Starlark Go Shell; do
+          for language in Starlark Go Shell "Protocol Buffer"; do
             if ! grep -q "^Formatted ${language} " <<<"${out}"; then
               echo "::error::the formatter did not run for ${language}" >&2
               exit 1
@@ -80,11 +89,43 @@ jobs:
       - name: the release targets exist
         run: |
           bazel query --config=ci --noshow_progress 'set(
-            //:image_push
-            //:image_index
-            //:upstream-secretsmanager_linux_amd64
-            //:upstream-secretsmanager_linux_arm64
+            //upstream-secretsmanager:image_push
+            //upstream-secretsmanager:image_index
+            //upstream-secretsmanager:upstream-secretsmanager_linux_amd64
+            //upstream-secretsmanager:upstream-secretsmanager_linux_arm64
+            //rotator:zip_linux_amd64
+            //rotator:zip_linux_arm64
             //bazel/cosign:cosign)'
+
+      # buf lint (buf.yaml's STANDARD and COMMENTS rules) and the committed
+      # .pb.go files being what their .proto files generate, for every proto
+      # of the repository: they are tests (bazel/proto/defs.bzl), run here on
+      # every change rather than only when bazel-diff sees them impacted.
+      - name: The protos pass buf lint and their generated code is fresh
+        run: |
+          set -euo pipefail
+          mapfile -t tests < <(bazel query --config=ci --noshow_progress \
+            'kind(buf_lint_test, //...) + attr(name, "^generated_test$", tests(//...))')
+          [ "${#tests[@]}" -gt 0 ] || { echo "::error::no proto test found" >&2; exit 1; }
+          printf '%s\n' "${tests[@]}"
+          bazel test --config=ci -- "${tests[@]}"
+
+      # A field renumbered, retyped, renamed or removed in the secret format or
+      # a configuration (buf.yaml's breaking rules). A pull request is
+      # compared with the commit it branched from; a push to main with the
+      # commit before it, since merges are squashed.
+      - name: The protos keep their compatibility
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "${BASE_REF}" ]; then
+            against="origin/${BASE_REF}"
+          elif [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            against="HEAD^"
+          else
+            against="origin/main"
+          fi
+          bazel/proto/breaking.sh "${against}" --config=ci
 
   # Target determination. bazel-diff hashes the build graph at the base and at
   # the head of the range under test and reports the targets whose hash

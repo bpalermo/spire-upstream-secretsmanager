@@ -2,7 +2,7 @@
 # The targets a revision range impacts, with Tinder/bazel-diff, as the lists
 # CI builds and tests from (.github/workflows/ci.yml, the `diff` job). A
 # change pays only for what it can affect: a documentation-only change builds
-# nothing, tests nothing and creates no kind cluster.
+# nothing and tests nothing.
 #
 # Written to OUT_DIR:
 #   impacted_build.txt   impacted ∩ the buildable rules (nothing tagged manual)
@@ -13,9 +13,9 @@
 #   has_any    impacted_build.txt is not empty: the build job runs
 #   has_test   impacted_test.txt is not empty: the build job runs the tests
 #
-# This repository has no end-to-end suite, so there is no has_e2e. When one
-# is added, put its inputs in the graph as `data` of the e2e test and add an
-# E2E_SET query and a has_e2e flag as the other bpalermo repositories do.
+# The end-to-end test (//integration/e2e) needs no network and no cluster: it
+# is an ordinary test, with its inputs (the SPIRE release, the plugin binary)
+# in the graph as its `data`, so there is no separate has_e2e.
 #
 # Fallback. On any error, and without a base (BASE_SHA empty or unreachable,
 # no bazel-diff), everything is impacted: impacted_build.txt is `//...`,
@@ -78,7 +78,7 @@ die() { # message: what to build could not be determined, and nothing wider is l
 #
 # A query that fails, and one that succeeds with nothing, both return 1. Each
 # list asked for here is certain to be non-empty in this repository (it has
-# rules, tests and an end-to-end suite), so an empty answer is a broken query
+# rules and tests), so an empty answer is a broken query
 # (a regex that matches nothing still exits 0) and never "nothing to test".
 # Left unchecked, it would empty a candidate list: every has_* false, every
 # job skipped and `ci` green over nothing.
@@ -193,9 +193,11 @@ cat >"${SEED}" <<'EOF'
 .shellcheckrc
 MODULE.bazel
 MODULE.bazel.lock
+VERSION
 bazel/ci-impacted-targets.sh
 bazel/lint/gocognit.bzl
 bazel/lint/linters.bzl
+bazel/workspace_status.sh
 EOF
 
 generate() { # ref outfile

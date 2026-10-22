@@ -1,10 +1,13 @@
 name: release
 
 # A tag v<VERSION> or v<VERSION>-rc.<n> on a commit of main publishes that
-# release: the plugin binaries, their checksums, an SBOM, the multi-arch image,
-# the cosign keyless signatures, and the GitHub Release that lists them. Who may
-# create such a tag, and that it can never be moved or deleted, is the
-# repository's tag rulesets'.
+# release of everything in the repository, under the one version: the plugin
+# binaries, the plugin's multi-arch image, the rotator Lambda's zip archives,
+# checksums.txt over the binaries and the archives, an SBOM, the cosign keyless
+# signatures, and the GitHub Release that lists them. The secret format
+# (//intermediateca) is a Go package of this module and is released as its
+# tag. Who may create such a tag, and that it can never be moved or deleted,
+# is the repository's tag rulesets'.
 on:
   push:
     tags: ["v*"]
@@ -21,8 +24,9 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Keep equal to the platforms of //:upstream-secretsmanager (the
-  # upstream-secretsmanager_<platform> targets) and the query in ci.yml.
+  # Keep equal to the platforms of //upstream-secretsmanager (the
+  # upstream-secretsmanager_<platform> targets) and of //rotator (the
+  # zip_<platform> targets), and to the query in ci.yml.
   RELEASE_PLATFORMS: linux_amd64 linux_arm64
 
 # Third-party actions are pinned to commit SHAs, not tags. This job holds
@@ -86,7 +90,7 @@ jobs:
       # instead of `dev`. The flag goes into user.bazelrc under --config=ci, so
       # that every build, run and cquery below sees one configuration.
       - name: Tag the image with the release
-        run: echo "common:ci --//:image_tag=${GITHUB_REF_NAME}" >> user.bazelrc
+        run: echo "common:ci --//upstream-secretsmanager:image_tag=${GITHUB_REF_NAME}" >> user.bazelrc
 
       # No version is pinned here: bazelisk reads .bazelversion.
       - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
@@ -106,24 +110,26 @@ jobs:
       #
       # Keep this list equal to the query in ci.yml, which fails a pull request
       # that renames or removes one of these.
-      - name: Build the binaries, the image and cosign
+      - name: Build the binaries, the archives, the image and cosign
         run: |
           set -euo pipefail
           targets=()
           for platform in ${RELEASE_PLATFORMS}; do
-            targets+=("//:upstream-secretsmanager_${platform}")
+            targets+=("//upstream-secretsmanager:upstream-secretsmanager_${platform}" "//rotator:zip_${platform}")
           done
           bazel build --config=ci --output_groups=+digest "${targets[@]}" \
-            //:image_push //:image_index \
+            //upstream-secretsmanager:image_push //upstream-secretsmanager:image_index \
             //bazel/cosign
 
-      # Named upstream-secretsmanager_<version>_<os>_<arch>, the version
-      # without its v, beside checksums.txt in sha256sum's format. SPIRE's
-      # plugin_checksum is the SHA-256 of the binary, so each line of
-      # checksums.txt is the value for that architecture. All come from one
-      # stamped build, so they carry one version; the linux/amd64 one, which
-      # this runner can run, must report the tag, or nothing is signed.
-      - name: Collect the binaries and their checksums
+      # The plugin binaries are named upstream-secretsmanager_<version>_<os>_<arch>
+      # and the Lambda archives kms-intermediate-rotator_<version>_linux_<arch>.zip,
+      # the version without its v, beside checksums.txt in sha256sum's format.
+      # SPIRE's plugin_checksum is the SHA-256 of the binary, so each plugin
+      # line of checksums.txt is the value for that architecture. All come
+      # from one stamped build, so they carry one version; the linux/amd64
+      # plugin and Lambda, which this runner can run, must report the tag, or
+      # nothing is signed.
+      - name: Collect the binaries, the archives and their checksums
         run: |
           set -euo pipefail
           status="$(bazel/workspace_status.sh)"
@@ -135,21 +141,36 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           rm -rf dist
           mkdir dist
-          for platform in ${RELEASE_PLATFORMS}; do
-            built="$(bazel cquery --config=ci "//:upstream-secretsmanager_${platform}" --output=files 2>/dev/null | head -1)"
-            if [ -z "${built}" ] || [ ! -s "${built}" ]; then
-              echo "::error::could not find the binary of ${platform} (${built})" >&2
+          # built <label>: the file the label built, or fail.
+          built() {
+            local f
+            f="$(bazel cquery --config=ci "$1" --output=files 2>/dev/null | head -1)"
+            if [ -z "${f}" ] || [ ! -s "${f}" ]; then
+              echo "::error::could not find what $1 built (${f})" >&2
               exit 1
             fi
-            install -m 0755 "${built}" "dist/upstream-secretsmanager_${version}_${platform}"
+            echo "${f}"
+          }
+          for platform in ${RELEASE_PLATFORMS}; do
+            install -m 0755 "$(built "//upstream-secretsmanager:upstream-secretsmanager_${platform}")" \
+              "dist/upstream-secretsmanager_${version}_${platform}"
+            install -m 0644 "$(built "//rotator:zip_${platform}")" \
+              "dist/kms-intermediate-rotator_${version}_${platform}.zip"
           done
           got="$("dist/upstream-secretsmanager_${version}_linux_amd64" --version)"
           if [ "${got}" != "upstream-secretsmanager ${GITHUB_REF_NAME}" ]; then
-            echo "::error::the binary reports '${got}', want 'upstream-secretsmanager ${GITHUB_REF_NAME}'" >&2
+            echo "::error::the plugin reports '${got}', want 'upstream-secretsmanager ${GITHUB_REF_NAME}'" >&2
             exit 1
           fi
-          cp "${RUNNER_TEMP}/sbom.spdx.json" "dist/upstream-secretsmanager_${version}_sbom.spdx.json"
-          (cd dist && sha256sum upstream-secretsmanager_*_linux_* >checksums.txt)
+          probe="$(mktemp -d)"
+          unzip -q "dist/kms-intermediate-rotator_${version}_linux_amd64.zip" -d "${probe}"
+          got="$("${probe}/bootstrap" --version)"
+          if [ "${got}" != "kms-intermediate-rotator ${GITHUB_REF_NAME}" ]; then
+            echo "::error::the Lambda's bootstrap reports '${got}', want 'kms-intermediate-rotator ${GITHUB_REF_NAME}'" >&2
+            exit 1
+          fi
+          cp "${RUNNER_TEMP}/sbom.spdx.json" "dist/spire-upstream-secretsmanager_${version}_sbom.spdx.json"
+          (cd dist && sha256sum upstream-secretsmanager_*_linux_* kms-intermediate-rotator_*_linux_*.zip >checksums.txt)
           cat dist/checksums.txt
 
       # cosign 3 writes the signature, its certificate and the transparency
@@ -161,7 +182,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          for f in checksums.txt "upstream-secretsmanager_${version}_sbom.spdx.json"; do
+          for f in checksums.txt "spire-upstream-secretsmanager_${version}_sbom.spdx.json"; do
             bazel run --config=ci //bazel/cosign -- sign-blob --bundle "dist/${f}.sigstore.json" "dist/${f}"
           done
 
@@ -169,7 +190,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          for f in checksums.txt "upstream-secretsmanager_${version}_sbom.spdx.json"; do
+          for f in checksums.txt "spire-upstream-secretsmanager_${version}_sbom.spdx.json"; do
             bazel run --config=ci //bazel/cosign -- verify-blob "dist/${f}" \
               --bundle "dist/${f}.sigstore.json" \
               --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
@@ -184,16 +205,16 @@ jobs:
           password: ${{ github.token }}
 
       - name: Push the multi-arch image
-        run: bazel run --config=ci //:image_push
+        run: bazel run --config=ci //upstream-secretsmanager:image_push
 
       # The digest comes from the build rather than from the registry: Bazel
       # already wrote the digest and the coordinates it pushed (image_push.json
-      # sits beside the index, in the same package of bazel-bin).
+      # sits beside the index, in upstream-secretsmanager/ of bazel-bin).
       - name: Record the pushed digest
         id: digest
         run: |
           set -euo pipefail
-          push="$(bazel info --config=ci bazel-bin 2>/dev/null)/image_push.json"
+          push="$(bazel info --config=ci bazel-bin 2>/dev/null)/upstream-secretsmanager/image_push.json"
           ref="$(jq -er '.operations[0] | .registry + "/" + .repository + "@" + .root.digest' "${push}")"
           if ! [[ "${ref}" =~ ^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]]; then
             echo "::error::unexpected image reference ${ref}" >&2
@@ -230,8 +251,9 @@ jobs:
           retention-days: 7
 
   # The GitHub Release of the tag: what was published, by digest, the checksum
-  # of each architecture's binary for SPIRE's plugin_checksum, and how to
-  # verify it, then the changes since the last release. A job of its own, so
+  # of each architecture's plugin binary for SPIRE's plugin_checksum, the
+  # SHA-256 of each Lambda archive, and how to verify them, then the changes
+  # since the last release. A job of its own, so
   # that the publishing job, which can write the package and sign, never also
   # holds a token that can write to the repository.
   release:
@@ -259,7 +281,8 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           want="$(printf '%s\n' checksums.txt checksums.txt.sigstore.json \
             "upstream-secretsmanager_${version}_linux_amd64" "upstream-secretsmanager_${version}_linux_arm64" \
-            "upstream-secretsmanager_${version}_sbom.spdx.json" "upstream-secretsmanager_${version}_sbom.spdx.json.sigstore.json" | sort)"
+            "kms-intermediate-rotator_${version}_linux_amd64.zip" "kms-intermediate-rotator_${version}_linux_arm64.zip" \
+            "spire-upstream-secretsmanager_${version}_sbom.spdx.json" "spire-upstream-secretsmanager_${version}_sbom.spdx.json.sigstore.json" | sort)"
           got="$(find dist -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)"
           if [ "${got}" != "${want}" ]; then
             echo "::error::the release artifact holds:" >&2
@@ -290,12 +313,17 @@ jobs:
           fi
           changes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" "${args[@]}" --jq .body)"
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
-          amd64="$(awk -v f="upstream-secretsmanager_${version}_linux_amd64" '$2 == f {print $1}' dist/checksums.txt)"
-          arm64="$(awk -v f="upstream-secretsmanager_${version}_linux_arm64" '$2 == f {print $1}' dist/checksums.txt)"
-          if [ -z "${amd64}" ] || [ -z "${arm64}" ]; then
-            echo "::error::checksums.txt has no checksum for one of the architectures" >&2
-            exit 1
-          fi
+          # sum <file>: its SHA-256 from checksums.txt, or fail.
+          sum() {
+            local v
+            v="$(awk -v f="$1" '$2 == f {print $1}' dist/checksums.txt)"
+            [ -n "${v}" ] || { echo "::error::checksums.txt has no checksum for $1" >&2; exit 1; }
+            echo "${v}"
+          }
+          amd64="$(sum "upstream-secretsmanager_${version}_linux_amd64")"
+          arm64="$(sum "upstream-secretsmanager_${version}_linux_arm64")"
+          zip_amd64="$(sum "kms-intermediate-rotator_${version}_linux_amd64.zip")"
+          zip_arm64="$(sum "kms-intermediate-rotator_${version}_linux_arm64.zip")"
           cat >notes.md <<NOTES
           ## Plugin checksums
 
@@ -310,7 +338,7 @@ jobs:
           The binaries are statically linked and stamped with \`${tag}\`
           (\`--version\`).
 
-          ## Image
+          ## Plugin image
 
           \`${IMAGE}\`
 
@@ -320,10 +348,29 @@ jobs:
           as a Kubernetes image volume and executed from there. Also tagged
           \`${tag}\`.
 
+          ## Rotator Lambda
+
+          For the \`provided.al2023\` custom runtime. Pick the archive of the
+          function's architecture; it holds one statically linked executable,
+          \`bootstrap\`. Lambda's \`source_code_hash\` is the base64 of the
+          same digest.
+
+          | Architecture | Archive | SHA-256 |
+          |---|---|---|
+          | arm64 | \`kms-intermediate-rotator_${version}_linux_arm64.zip\` | \`${zip_arm64}\` |
+          | x86_64 | \`kms-intermediate-rotator_${version}_linux_amd64.zip\` | \`${zip_amd64}\` |
+
+          ## Secret format
+
+          \`intermediate-ca/v1\`, unchanged in meaning across releases
+          (docs/secret-format.md). Go package
+          \`github.com/bpalermo/spire-upstream-secretsmanager/intermediateca@${tag}\`.
+
           ## Verify
 
-          The image, its platform manifests, \`checksums.txt\` and the SBOM are
-          signed by this release's workflow run:
+          The image, its platform manifests, \`checksums.txt\` (which lists the
+          plugin binaries and the Lambda archives) and the SBOM are signed by
+          this release's workflow run:
 
           \`\`\`bash
           cosign verify ${IMAGE} \\

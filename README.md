@@ -11,17 +11,19 @@ tested and released together from this repository:
 | **kms-intermediate-rotator** | [`rotator/`](rotator) | A Secrets Manager rotation Lambda that issues a name-constrained intermediate CA signed by a KMS key. | `kms-intermediate-rotator_<version>_linux_<arch>.zip` |
 | **intermediate-ca/v1** | [`intermediateca/`](intermediateca) | The secret format the two share: a JSON document, its protobuf schema, and the Go package that reads and writes it. | not released on its own: the specification, and the in-repo implementation the rotator and the plugin use |
 
-```text
- AWS KMS key (root, never leaves KMS)
-      | Sign
-      v
- rotator Lambda --PutSecretValue--> Secrets Manager secret (intermediate-ca/v1)
-                                         | GetSecretValue AWSCURRENT, at every mint
-                                         v
-                    SPIRE server + upstream-secretsmanager plugin
-                                         | signs
-                                         v
-                        SPIRE CA --> X509-SVIDs (chain to the KMS root)
+```mermaid
+flowchart TD
+    kms["AWS KMS key<br/>(root, never leaves KMS)"]
+    lambda["rotator Lambda"]
+    secret["Secrets Manager secret<br/>(intermediate-ca/v1)"]
+    spire["SPIRE server +<br/>upstream-secretsmanager plugin"]
+    ca["SPIRE CA"]
+    svid["X509-SVIDs<br/>(chain to the KMS root)"]
+    kms -- Sign --> lambda
+    lambda -- PutSecretValue --> secret
+    secret -- "GetSecretValue AWSCURRENT,<br/>at every mint" --> spire
+    spire -- signs --> ca
+    ca --> svid
 ```
 
 Each piece works without the others: the plugin reads any secret in the

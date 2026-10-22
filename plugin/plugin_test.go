@@ -351,7 +351,7 @@ func TestInvalidSecretFallsBackToLastGood(t *testing.T) {
 	if !chain[1].Equal(p.Intermediate.Cert) {
 		t.Fatal("did not keep the last good intermediate")
 	}
-	if !strings.Contains(h.log.String(), "unsupported secret format") {
+	if !strings.Contains(h.log.String(), "format (string.const)") {
 		t.Fatalf("no warning with the reason:\n%s", h.log)
 	}
 }
@@ -812,5 +812,23 @@ func TestJSONConfig(t *testing.T) {
 	h.mustMint(t)
 	if err := h.configure(t, fmt.Sprintf(`{"secret_id": %q, "root_sha256": %q, "typo": 1}`, secretID, p.PinHex())); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("JSON with an unknown key = %v", err)
+	}
+}
+
+// plugin_data in JSON takes the same path as HCL: one pin as a string or a
+// list, in either case, and unknown keys refused.
+func TestJSONPluginData(t *testing.T) {
+	p := testpki.New(t, testpki.Options{})
+	h := serve(t, newFake(map[string]string{secretID: p.V1(t)}))
+	for _, pins := range []string{
+		fmt.Sprintf("%q", p.PinHex()),
+		fmt.Sprintf("[%q, %q]", anyPin, strings.ToUpper(p.PinHex())),
+	} {
+		h.mustConfigure(t, fmt.Sprintf(`{"secret_id": %q, "root_sha256": %s, "fetch_timeout": "5s"}`, secretID, pins))
+		h.mustMint(t)
+	}
+	err := h.configure(t, fmt.Sprintf(`{"secret_id": %q, "root_sha256": %q, "root_sha265": "x"}`, secretID, p.PinHex()))
+	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "unknown configuration keys: root_sha265") {
+		t.Fatalf("Configure with an unknown JSON key = %v", err)
 	}
 }

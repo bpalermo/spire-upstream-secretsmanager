@@ -219,14 +219,14 @@ func Encode(t testing.TB, fields map[string]string) string {
 }
 
 // Pin is the SHA-256 of the root's DER, as root_sha256 takes it.
-func (p *PKI) Pin() []byte {
-	sum := sha256.Sum256(p.Root.Cert.Raw)
-	return sum[:]
+func (p *PKI) Pin() [32]byte {
+	return sha256.Sum256(p.Root.Cert.Raw)
 }
 
 // PinHex is [PKI.Pin] in hex.
 func (p *PKI) PinHex() string {
-	return hex.EncodeToString(p.Pin())
+	sum := p.Pin()
+	return hex.EncodeToString(sum[:])
 }
 
 // PEM is the certificate, PEM-encoded.

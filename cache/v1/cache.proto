@@ -1,0 +1,41 @@
+// The plugin's cache file (cache_path): the last good intermediate CA, kept
+// so that the plugin can keep minting while Secrets Manager is unreachable,
+// including across a restart.
+//
+// The file is the protobuf JSON mapping of one CacheEntry, written by the
+// plugin alone (mode 0600, atomically). It is read strictly: a file with an
+// unknown field, or one that breaks a rule below, is not a cache entry and is
+// ignored.
+syntax = "proto3";
+
+package cache.v1;
+
+import "buf/validate/validate.proto";
+import "intermediateca/v1/secret.proto";
+
+option go_package = "github.com/bpalermo/spire-upstream-secretsmanager/cache/v1;cachev1";
+
+// CacheEntry is an intermediate CA and the upstream roots SPIRE receives with
+// it.
+message CacheEntry {
+  // secret is the intermediate CA, in the intermediate-ca/v1 format; the
+  // plugin reads it as it reads a secret.
+  intermediateca.v1.Secret secret = 1 [(buf.validate.field).required = true];
+
+  // upstream_bundle holds the upstream roots SPIRE receives, one PEM
+  // "CERTIFICATE" block each, when they are more than secret.root (the
+  // awssecret layout's bundle file). Empty: secret.root alone. It must
+  // include secret.root.
+  repeated string upstream_bundle = 2 [
+    json_name = "upstream_bundle",
+    (buf.validate.field).repeated = {
+      max_items: 64
+      items: {
+        string: {
+          prefix: "-----BEGIN CERTIFICATE-----"
+          max_bytes: 16384
+        }
+      }
+    }
+  ];
+}

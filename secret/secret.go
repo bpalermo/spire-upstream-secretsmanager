@@ -1,17 +1,20 @@
-// Package secret parses and validates the intermediate CA that the plugin
-// reads from AWS Secrets Manager, in either of the two layouts it supports:
+// Package secret reads the intermediate CA that the plugin gets from AWS
+// Secrets Manager, in either of the two layouts it supports:
 //
-//   - format v1 (docs/secret-format.md): one secret whose SecretString is a
-//     JSON object with the intermediate certificate, its key, the chain and
-//     the root;
+//   - one secret in the intermediate-ca/v1 format (docs/secret-format.md),
+//     which [ParseV1] decodes with the format's reader, package
+//     intermediateca;
 //   - the layout of SPIRE's built-in awssecret UpstreamAuthority: up to three
 //     secrets whose SecretString is PEM (the certificate file, the key file
-//     and the bundle file).
+//     and the bundle file), which [ParseAWSSecretLayout] reads and then
+//     checks with the same reader.
 //
-// Either way the result is an [Authority], which is validated the same way
-// before it is used: the key matches the certificate, the certificate is a CA
-// and verifies to the root through the chain, the root is the pinned one (if
-// a pin is configured) and enough of the certificate's lifetime is left.
+// Either way the result is an [Authority]: an [intermediateca.Bundle] the
+// shared reader accepted (the key matches the certificate, the certificate is
+// a CA and verifies to the root through the chain) and the upstream roots.
+// [Authority.Validate] adds the plugin's own checks before every use: the
+// root is a pinned one, enough of the certificate's lifetime is left, and it
+// can sign a SPIRE CA for the trust domain.
 package secret
 
 import (
@@ -19,119 +22,54 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
+
+	"github.com/bpalermo/spire-upstream-secretsmanager/intermediateca"
 )
 
-// FormatV1 is the value of the "format" field of a format v1 secret.
-const FormatV1 = "intermediate-ca/v1"
-
 // Authority is an intermediate CA: the certificate the plugin signs with,
-// its private key, the certificates between it and the root, and the root.
+// its private key, the certificates between it and the root, and the root
+// (the embedded Bundle), with the upstream roots SPIRE receives.
 type Authority struct {
-	// Cert is the intermediate CA certificate.
-	Cert *x509.Certificate
-	// Key is Cert's private key.
-	Key crypto.Signer
-	// Chain holds the certificates between Cert and Root, in order from the
-	// one that signed Cert towards the root. It may be empty.
-	Chain []*x509.Certificate
-	// Root is the trust anchor Cert verifies to. It is Cert itself when Cert
-	// is self-signed.
-	Root *x509.Certificate
-	// Roots are the upstream roots SPIRE receives. It always holds Root; with
-	// the awssecret layout it is the whole bundle, as SPIRE's awssecret and
-	// disk plugins publish it. Nil means [Root].
+	intermediateca.Bundle
+	// Roots are the upstream roots SPIRE receives. With the awssecret layout
+	// it is the whole bundle, as SPIRE's awssecret and disk plugins publish
+	// it, which includes Root. Nil means [Root] alone.
 	Roots []*x509.Certificate
 }
 
-// v1 is the JSON of a format v1 secret. Unknown fields are ignored.
-type v1 struct {
-	Format string `json:"format"`
-	Cert   string `json:"cert"`
-	Key    string `json:"key"`
-	Chain  string `json:"chain"`
-	Root   string `json:"root"`
-	// UpstreamBundle is not part of format v1: the plugin's cache uses it to
-	// keep the awssecret bundle (Roots) when it holds more than the root. It
-	// is read only by [ParseCache], never from a secret.
-	UpstreamBundle string `json:"x_upstream_bundle,omitempty"`
-}
-
-// ParseV1 parses a format v1 secret. It checks the structure (format, one
-// certificate in cert and in root, a PKCS#8 key); [Authority.Validate] checks
-// the rest.
-func ParseV1(data []byte) (*Authority, error) {
-	a, _, err := parseV1(data)
-	return a, err
-}
-
-// ParseCache parses the plugin's cache file: format v1, plus the awssecret
-// bundle when it holds more than the root.
-func ParseCache(data []byte) (*Authority, error) {
-	a, bundle, err := parseV1(data)
-	if err != nil || bundle == "" {
-		return a, err
-	}
-	if a.Roots, err = parseCertificates(bundle); err != nil {
-		return nil, fmt.Errorf("x_upstream_bundle: %w", err)
-	}
-	return a, nil
-}
-
-func parseV1(data []byte) (*Authority, string, error) {
-	a, s, err := parseV1Fields(data)
+// ParseV1 decodes a secret in the intermediate-ca/v1 format as of at, with
+// [intermediateca.DecodeAt]: unknown fields are ignored, and anything that is
+// not a coherent intermediate CA valid at that time is refused, with an error
+// that wraps one of the intermediateca sentinels.
+func ParseV1(data []byte, at time.Time) (*Authority, error) {
+	b, err := intermediateca.DecodeAt(data, at)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return a, s.UpstreamBundle, nil
-}
-
-func parseV1Fields(data []byte) (*Authority, *v1, error) {
-	var s v1
-	if err := json.Unmarshal(data, &s); err != nil {
-		return nil, nil, fmt.Errorf("secret is not a JSON object: %w", err)
-	}
-	if s.Format != FormatV1 {
-		return nil, nil, fmt.Errorf("unsupported secret format %q, want %q", s.Format, FormatV1)
-	}
-	cert, err := parseOneCertificate("cert", s.Cert)
-	if err != nil {
-		return nil, nil, err
-	}
-	root, err := parseOneCertificate("root", s.Root)
-	if err != nil {
-		return nil, nil, err
-	}
-	chain, err := parseCertificates(s.Chain)
-	if err != nil {
-		return nil, nil, fmt.Errorf("chain: %w", err)
-	}
-	key, err := parsePKCS8Key(s.Key)
-	if err != nil {
-		return nil, nil, fmt.Errorf("key: %w", err)
-	}
-	return &Authority{Cert: cert, Key: key, Chain: chain, Root: root}, &s, nil
+	return FromBundle(b, nil, at)
 }
 
 // ParseAWSSecretLayout builds an Authority from the three PEM documents of
 // SPIRE's awssecret layout, read exactly as awssecret reads them: certPEM
 // holds the CA certificate first, optionally followed by the intermediates
-// up to the root; keyPEM holds its private key; bundlePEM holds the trust
-// bundle. bundlePEM may be empty only if certPEM is exactly one self-signed
-// certificate, which is then its own root.
+// up to the root; keyPEM holds its private key (PKCS#8, SEC 1 or PKCS#1);
+// bundlePEM holds the trust bundle. bundlePEM may be empty only if certPEM is
+// exactly one self-signed certificate, which is then its own root.
 //
 // The root is the certificate of the bundle that the certificate verifies to
-// at time at; the whole bundle is kept as the upstream roots.
+// at time at; the whole bundle is kept as the upstream roots. The result is
+// written in the intermediate-ca/v1 format and decoded again, so that it
+// passes exactly the checks a format v1 secret does.
 func ParseAWSSecretLayout(certPEM, keyPEM, bundlePEM string, at time.Time) (*Authority, error) {
-	certs, err := parseCertificates(certPEM)
+	certs, err := ParseCertificates(certPEM)
 	if err != nil {
 		return nil, fmt.Errorf("cert_file_arn: %w", err)
 	}
@@ -142,7 +80,33 @@ func ParseAWSSecretLayout(certPEM, keyPEM, bundlePEM string, at time.Time) (*Aut
 	if err != nil {
 		return nil, fmt.Errorf("key_file_arn: %w", err)
 	}
-	a := &Authority{Cert: certs[0], Key: key, Chain: certs[1:]}
+	b := &intermediateca.Bundle{Cert: certs[0], Key: key, Chain: certs[1:]}
+	roots, err := awsSecretRoots(certs, bundlePEM)
+	if err != nil {
+		return nil, err
+	}
+	if roots == nil {
+		b.Root = certs[0]
+	} else if b.Root, err = anchorOf(b.Cert, b.Chain, roots, at); err != nil {
+		return nil, err
+	}
+	// The awssecret certificate file may end with the root, which the
+	// format's chain should not hold.
+	b.Chain = slices.DeleteFunc(b.Chain, b.Root.Equal)
+	data, err := intermediateca.Encode(b)
+	if err != nil {
+		return nil, err
+	}
+	decoded, err := intermediateca.DecodeAt(data, at)
+	if err != nil {
+		return nil, err
+	}
+	return FromBundle(decoded, roots, at)
+}
+
+// awsSecretRoots parses the awssecret bundle file: nil roots, with no error,
+// for a CA without one, which is then its own root.
+func awsSecretRoots(certs []*x509.Certificate, bundlePEM string) ([]*x509.Certificate, error) {
 	if bundlePEM == "" {
 		// As awssecret: with no bundle, only a self-signed CA is supported,
 		// and it is its own trust anchor.
@@ -152,22 +116,44 @@ func ParseAWSSecretLayout(certPEM, keyPEM, bundlePEM string, at time.Time) (*Aut
 		if len(certs) != 1 || !isSelfSigned(certs[0]) {
 			return nil, errors.New("with no bundle_file_arn configured only self-signed CAs are supported")
 		}
-		a.Root = certs[0]
-		a.Roots = []*x509.Certificate{certs[0]}
-		return a, nil
+		return nil, nil
 	}
-	bundle, err := parseCertificates(bundlePEM)
+	roots, err := ParseCertificates(bundlePEM)
 	if err != nil {
 		return nil, fmt.Errorf("bundle_file_arn: %w", err)
 	}
-	if len(bundle) == 0 {
+	if len(roots) == 0 {
 		return nil, errors.New("bundle_file_arn: no certificate found")
 	}
-	a.Root, err = anchorOf(a.Cert, a.Chain, bundle, at)
-	if err != nil {
-		return nil, err
+	return roots, nil
+}
+
+// FromBundle returns the Authority of a bundle that [intermediateca.DecodeAt]
+// accepted at time at, with roots as its upstream roots (nil: the bundle's
+// root alone). It refuses a key type SPIRE does not support for an upstream
+// CA, and upstream roots without the bundle's root; and it orders the chain
+// from the certificate that signed Cert towards the root, the order SPIRE
+// receives it in, since the format puts the chain in no required order.
+func FromBundle(b *intermediateca.Bundle, roots []*x509.Certificate, at time.Time) (*Authority, error) {
+	if _, err := asSigner(b.Key); err != nil {
+		return nil, fmt.Errorf("key: %w", err)
 	}
-	a.Roots = bundle
+	a := &Authority{Bundle: *b, Roots: roots}
+	pool := x509.NewCertPool()
+	pool.AddCert(a.Root)
+	chains, err := a.Cert.Verify(verifyOptions(a.Chain, pool, at))
+	if err != nil {
+		return nil, fmt.Errorf("certificate does not verify to the root through the chain: %w", err)
+	}
+	// The path is [Cert, the chain in order..., Root], and [Cert] when Cert
+	// is the root.
+	a.Chain = nil
+	if path := chains[0]; len(path) > 2 {
+		a.Chain = path[1 : len(path)-1]
+	}
+	if !slices.ContainsFunc(a.UpstreamRoots(), a.Root.Equal) {
+		return nil, errors.New("the upstream roots do not include the root")
+	}
 	return a, nil
 }
 
@@ -184,8 +170,7 @@ func anchorOf(cert *x509.Certificate, chain, bundle []*x509.Certificate, at time
 	for _, c := range bundle {
 		roots.AddCert(c)
 	}
-	opts := verifyOptions(chain, roots, at)
-	chains, err := cert.Verify(opts)
+	chains, err := cert.Verify(verifyOptions(chain, roots, at))
 	if err != nil {
 		return nil, fmt.Errorf("certificate cannot be validated with the provided bundle or is not self-signed: %w", err)
 	}
@@ -203,20 +188,24 @@ type ValidateOptions struct {
 	MinRemaining time.Duration
 	// RootPins are the SHA-256s of the DER of the roots accepted. At least
 	// one is required.
-	RootPins [][]byte
+	RootPins [][32]byte
 	// TrustDomain is the trust domain the intermediate must be able to sign
 	// a SPIRE CA for. Required.
 	TrustDomain spiffeid.TrustDomain
 }
 
-// Validate checks that the authority can be used: the key matches the
-// certificate, the certificate is a CA, the root is pinned, the certificate
-// verifies to the root through the chain at opts.Now, at least
-// opts.MinRemaining of its lifetime is left, and it can actually sign a CA
-// for the trust domain whose X509-SVIDs verify to the root (path length and
-// name constraints included), which SPIRE checks for every CA it receives.
+// Validate checks, before every use, what the format leaves to the plugin:
+// the root is pinned, the certificate still verifies to the root through the
+// chain at opts.Now, at least opts.MinRemaining of its lifetime is left, and
+// it can actually sign a CA for the trust domain whose X509-SVIDs verify to
+// the root (path length and name constraints included), which SPIRE checks
+// for every CA it receives. The format's own checks were made when the
+// Authority was read.
 func (a *Authority) Validate(opts ValidateOptions) error {
-	if err := a.validateStatic(opts); err != nil {
+	if a == nil || a.Cert == nil || a.Key == nil || a.Root == nil {
+		return errors.New("incomplete intermediate CA")
+	}
+	if err := a.checkPinned(opts.RootPins); err != nil {
 		return err
 	}
 	roots := x509.NewCertPool()
@@ -231,47 +220,21 @@ func (a *Authority) Validate(opts ValidateOptions) error {
 	return a.probe(opts)
 }
 
-// validateStatic runs the checks that do not depend on the time.
-func (a *Authority) validateStatic(opts ValidateOptions) error {
-	if a == nil || a.Cert == nil || a.Key == nil || a.Root == nil {
-		return errors.New("incomplete intermediate CA")
-	}
-	if err := keyMatches(a.Key, a.Cert); err != nil {
-		return err
-	}
-	if !a.Cert.BasicConstraintsValid || !a.Cert.IsCA {
-		return errors.New("certificate is not a CA certificate")
-	}
-	if a.Cert.KeyUsage != 0 && a.Cert.KeyUsage&x509.KeyUsageCertSign == 0 {
-		return errors.New("certificate key usage does not allow certificate signing")
-	}
-	if !a.hasRoot() {
-		return errors.New("the upstream roots do not include the root")
-	}
-	return checkPinned(a.Root, opts.RootPins)
-}
-
-func (a *Authority) hasRoot() bool {
-	for _, r := range a.UpstreamRoots() {
-		if r.Equal(a.Root) {
-			return true
-		}
-	}
-	return false
-}
-
-// checkPinned checks that root's SHA-256 is one of pins.
-func checkPinned(root *x509.Certificate, pins [][]byte) error {
+// checkPinned checks that the root's SHA-256 is one of pins.
+func (a *Authority) checkPinned(pins [][32]byte) error {
 	if len(pins) == 0 {
 		return errors.New("no root_sha256 configured")
 	}
-	got := RootSHA256(root)
-	for _, pin := range pins {
-		if bytes.Equal(got[:], pin) {
-			return nil
-		}
+	if slices.Contains(pins, intermediateca.RootSHA256(&a.Bundle)) {
+		return nil
 	}
-	return fmt.Errorf("root certificate SHA-256 %x is not one of the configured root_sha256", got)
+	return fmt.Errorf("root certificate SHA-256 %s is not one of the configured root_sha256", a.RootSHA256Hex())
+}
+
+// RootSHA256Hex is the SHA-256 of the root certificate's DER, the value
+// root_sha256 pins, in hexadecimal.
+func (a *Authority) RootSHA256Hex() string {
+	return intermediateca.RootSHA256Hex(&a.Bundle)
 }
 
 // verifyOptions verifies a CA certificate: any extended key usage is fine,
@@ -313,66 +276,24 @@ func (a *Authority) UpstreamRoots() []*x509.Certificate {
 	return a.Roots
 }
 
-// RootSHA256 returns the SHA-256 of the root certificate's DER, the value
-// root_sha256 pins.
-func RootSHA256(root *x509.Certificate) [sha256.Size]byte {
-	return sha256.Sum256(root.Raw)
-}
-
-// MarshalV1 encodes the authority as a format v1 secret, with the key in
-// PKCS#8. When the upstream roots hold more than the root (the awssecret
-// layout), they are kept in the x_upstream_bundle field, which only
-// [ParseCache] reads.
-func (a *Authority) MarshalV1() ([]byte, error) {
-	der, err := x509.MarshalPKCS8PrivateKey(a.Key)
-	if err != nil {
-		return nil, fmt.Errorf("unable to encode the private key: %w", err)
-	}
-	var chain []byte
-	for _, c := range a.Chain {
-		chain = append(chain, encodeCertificate(c)...)
-	}
-	return json.Marshal(v1{
-		Format:         FormatV1,
-		Cert:           string(encodeCertificate(a.Cert)),
-		Key:            string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})),
-		Chain:          string(chain),
-		Root:           string(encodeCertificate(a.Root)),
-		UpstreamBundle: a.extraBundle(),
-	})
-}
-
-func (a *Authority) extraBundle() string {
+// ExtraRoots are the upstream roots when they are more than the root (the
+// awssecret layout's bundle), and nil when they are the root alone.
+func (a *Authority) ExtraRoots() []*x509.Certificate {
 	roots := a.UpstreamRoots()
 	if len(roots) == 1 && roots[0].Equal(a.Root) {
-		return ""
+		return nil
 	}
-	var out []byte
-	for _, c := range roots {
-		out = append(out, encodeCertificate(c)...)
-	}
-	return string(out)
+	return roots
 }
 
-func encodeCertificate(c *x509.Certificate) []byte {
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
+// CertificatePEM encodes a certificate as one PEM "CERTIFICATE" block.
+func CertificatePEM(c *x509.Certificate) string {
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: c.Raw}))
 }
 
-// parseOneCertificate parses a field that must hold exactly one certificate.
-func parseOneCertificate(field, s string) (*x509.Certificate, error) {
-	certs, err := parseCertificates(s)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", field, err)
-	}
-	if len(certs) != 1 {
-		return nil, fmt.Errorf("%s: want exactly one certificate, found %d", field, len(certs))
-	}
-	return certs[0], nil
-}
-
-// parseCertificates parses every CERTIFICATE block of s. Anything else in s
+// ParseCertificates parses every CERTIFICATE block of s. Anything else in s
 // is an error, as is a PEM document with trailing garbage.
-func parseCertificates(s string) ([]*x509.Certificate, error) {
+func ParseCertificates(s string) ([]*x509.Certificate, error) {
 	var certs []*x509.Certificate
 	rest := []byte(s)
 	for {
@@ -396,8 +317,10 @@ func parseCertificates(s string) ([]*x509.Certificate, error) {
 	return certs, nil
 }
 
-// decodeOneBlock returns the only PEM block of s.
-func decodeOneBlock(s string) (*pem.Block, error) {
+// parseAnyKey parses a PEM private key in any of the encodings SPIRE's
+// pemutil accepts: PKCS#8, SEC 1 (EC) or PKCS#1 (RSA). The parsers' errors,
+// which describe the key's encoding, are left out as a precaution.
+func parseAnyKey(s string) (crypto.Signer, error) {
 	block, rest := pem.Decode([]byte(s))
 	if block == nil {
 		return nil, errors.New("no PEM block found")
@@ -405,43 +328,25 @@ func decodeOneBlock(s string) (*pem.Block, error) {
 	if len(bytes.TrimSpace(rest)) != 0 {
 		return nil, errors.New("want exactly one PEM block")
 	}
-	return block, nil
-}
-
-// parsePKCS8Key parses a PKCS#8 PEM private key, as format v1 requires.
-func parsePKCS8Key(s string) (crypto.Signer, error) {
-	block, err := decodeOneBlock(s)
-	if err != nil {
-		return nil, err
-	}
-	if block.Type != "PRIVATE KEY" {
-		return nil, fmt.Errorf("want a PKCS#8 \"PRIVATE KEY\" PEM block, found %q", block.Type)
-	}
-	k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("unable to parse PKCS#8 private key: %w", err)
-	}
-	return asSigner(k)
-}
-
-// parseAnyKey parses a PEM private key in any of the encodings SPIRE's
-// pemutil accepts: PKCS#8, SEC 1 (EC) or PKCS#1 (RSA).
-func parseAnyKey(s string) (crypto.Signer, error) {
-	block, err := decodeOneBlock(s)
-	if err != nil {
-		return nil, err
-	}
 	switch block.Type {
 	case "PRIVATE KEY":
 		k, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("unable to parse PKCS#8 private key: %w", err)
+			return nil, errors.New("unable to parse PKCS#8 private key")
 		}
 		return asSigner(k)
 	case "EC PRIVATE KEY":
-		return x509.ParseECPrivateKey(block.Bytes)
+		k, err := x509.ParseECPrivateKey(block.Bytes)
+		if err != nil {
+			return nil, errors.New("unable to parse SEC 1 private key")
+		}
+		return k, nil
 	case "RSA PRIVATE KEY":
-		return x509.ParsePKCS1PrivateKey(block.Bytes)
+		k, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, errors.New("unable to parse PKCS#1 private key")
+		}
+		return k, nil
 	default:
 		return nil, fmt.Errorf("unexpected PEM block %q", block.Type)
 	}
@@ -458,13 +363,4 @@ func asSigner(k any) (crypto.Signer, error) {
 	default:
 		return nil, fmt.Errorf("unsupported private key type %T", k)
 	}
-}
-
-// keyMatches checks that key is the private key of cert.
-func keyMatches(key crypto.Signer, cert *x509.Certificate) error {
-	pub, ok := key.Public().(interface{ Equal(crypto.PublicKey) bool })
-	if !ok || !pub.Equal(cert.PublicKey) {
-		return errors.New("certificate and private key do not match")
-	}
-	return nil
 }

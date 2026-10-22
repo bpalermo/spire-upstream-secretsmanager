@@ -121,9 +121,8 @@ same bytes:
 - `key` is an unencrypted PKCS#8 block.
 
 A writer MAY add fields of its own whose names start with `x_`; readers ignore
-them. Version 1 will never define a field with that prefix. (One reader uses
-`x_upstream_bundle` in its own cache file.) Anything else added to the object is
-a change of the format.
+them. Version 1 will never define a field with that prefix. Anything else
+added to the object is a change of the format.
 
 A writer SHOULD decode what it wrote with a reader's rules before it makes it
 current.

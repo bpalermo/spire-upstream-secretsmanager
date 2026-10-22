@@ -484,7 +484,7 @@ anchor.
 - [`docs/secret-format.md`](docs/secret-format.md): the specification, which
   is authoritative.
 - [`intermediateca/v1/secret.proto`](intermediateca/v1/secret.proto): the
-  schema, with protovalidate rules; its generated Go is committed.
+  schema, with protovalidate rules.
 - [`intermediateca/testdata/`](intermediateca/testdata): documents any
   implementation must accept or refuse, with `manifest.json`.
 
@@ -521,6 +521,12 @@ data, err := intermediateca.Encode(&intermediateca.Bundle{
 `DecodeAt(data, t)` checks validity at `t` instead of now. The generated
 message type (`Bundle.Raw`) is in
 `github.com/bpalermo/spire-upstream-secretsmanager/intermediateca/v1`.
+
+The Go packages build with Bazel: the code generated from the protos is not
+committed. A plain `go get` of `intermediateca` therefore lacks
+`intermediateca/v1`, and a user of the Go toolchain alone has to generate it
+(protoc with protoc-gen-go, from `intermediateca/v1/secret.proto` and
+protovalidate's `buf/validate/validate.proto`).
 
 ## Deployment
 

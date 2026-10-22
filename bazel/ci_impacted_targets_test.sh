@@ -20,7 +20,7 @@ cat >"${work}/rules.txt" <<'EOF'
 //integration/e2e:e2e_test
 //internal/version:version
 //internal/version:version_test
-//intermediateca/v1:generated_test
+//intermediateca/v1:intermediatecav1_proto_lint_test
 //intermediateca/v1:intermediateca
 //rotator:rotator
 //rotator:rotator_test
@@ -33,7 +33,7 @@ EOF
 cat >"${work}/tests.txt" <<'EOF'
 //integration/e2e:e2e_test
 //internal/version:version_test
-//intermediateca/v1:generated_test
+//intermediateca/v1:intermediatecav1_proto_lint_test
 //rotator:rotator_test
 //upstream-secretsmanager:upstream-secretsmanager_test
 EOF
@@ -116,12 +116,11 @@ expect rotator "//integration/e2e:e2e_test
 //rotator:zip_linux_amd64" "//integration/e2e:e2e_test
 //rotator:rotator_test"
 
-# A change to the secret format's proto: the generated-code freshness test
-# runs; the manual generator (//intermediateca/v1:generate) is dropped.
-expect proto "//intermediateca/v1:generate
-//intermediateca/v1:generated_test
+# A change to the secret format's proto: its buf lint test runs; the source
+# file's label is dropped.
+expect proto "//intermediateca/v1:intermediatecav1_proto_lint_test
 //intermediateca/v1:secret.proto
-" "//intermediateca/v1:generated_test" "//intermediateca/v1:generated_test"
+" "//intermediateca/v1:intermediatecav1_proto_lint_test" "//intermediateca/v1:intermediatecav1_proto_lint_test"
 
 # A rule that is not a test: built, nothing tested.
 expect image "//upstream-secretsmanager:image_load

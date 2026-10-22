@@ -1,16 +1,8 @@
 load("@rules_shell//shell:sh_library.bzl", "sh_library")
 
-# The generator and the freshness test of the committed .pb.go files
-# (defs.bzl): every proto package uses these two scripts.
-exports_files(
-    [
-        "generate.sh",
-        "generated_test.sh",
-    ],
-    visibility = ["//:__subpackages__"],
-)
-
-# For the shellcheck aspect (--config=lint).
+# breaking.sh (buf breaking of every proto against a base commit, the `lint`
+# job of ci.yml) is run by people and workflows; this is how the shellcheck
+# aspect (--config=lint) sees it.
 sh_library(
     name = "scripts",
     srcs = glob(["*.sh"]),

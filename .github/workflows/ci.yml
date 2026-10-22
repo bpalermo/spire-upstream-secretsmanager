@@ -28,12 +28,12 @@ concurrency:
 # Target determination: `diff` computes, with bazel-diff, the targets this
 # change impacts (bazel/ci-impacted-targets.sh) and hands `build` the lists to
 # build and test from; `build` is skipped when nothing is impacted. The checks
-# that cover the whole tree cheaply (the formatter, Gazelle, buf lint, buf
-# breaking, the freshness of the committed generated code) run every time, in
-# `lint`. Anything bazel-diff cannot decide (no base, an error) is a full run.
+# that cover the whole tree cheaply (the formatter, Gazelle, buf breaking)
+# run every time, in `lint`; buf lint is an ordinary test, run when its proto
+# is impacted. Anything bazel-diff cannot decide (no base, an error) is a full run.
 jobs:
   # The whole-tree checks that cost no build of consequence: the formatter,
-  # the BUILD files' freshness and the protos. Unconditional, so a change
+  # the BUILD files' freshness and buf breaking. Unconditional, so a change
   # bazel-diff scopes down to nothing is still formatted, generated and
   # compatible.
   lint:
@@ -102,19 +102,6 @@ jobs:
       # through bazel/registry.sh, and nothing else may spell it out.
       - name: The registry is one setting
         run: bazel/check-registry-config.sh
-
-      # buf lint (buf.yaml's STANDARD and COMMENTS rules) and the committed
-      # .pb.go files being what their .proto files generate, for every proto
-      # of the repository: they are tests (bazel/proto/defs.bzl), run here on
-      # every change rather than only when bazel-diff sees them impacted.
-      - name: The protos pass buf lint and their generated code is fresh
-        run: |
-          set -euo pipefail
-          mapfile -t tests < <(bazel query --config=ci --noshow_progress \
-            'kind(buf_lint_test, //...) + attr(name, "^generated_test$", tests(//...))')
-          [ "${#tests[@]}" -gt 0 ] || { echo "::error::no proto test found" >&2; exit 1; }
-          printf '%s\n' "${tests[@]}"
-          bazel test --config=ci -- "${tests[@]}"
 
       # A field renumbered, retyped, renamed or removed in the secret format or
       # a configuration (buf.yaml's breaking rules). A pull request is

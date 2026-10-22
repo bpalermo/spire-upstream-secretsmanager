@@ -7,7 +7,7 @@ tested and released together from this repository:
 
 | Component | Directory | What it is | Released as |
 | --- | --- | --- | --- |
-| **upstream-secretsmanager** | [`upstream-secretsmanager/`](upstream-secretsmanager) | A SPIRE UpstreamAuthority plugin that reads its intermediate CA from Secrets Manager at every mint, with a validated local cache. | static binaries (linux/amd64, linux/arm64) and the image `ghcr.io/bpalermo/spire-upstream-secretsmanager` |
+| **upstream-secretsmanager** | [`upstream-secretsmanager/`](upstream-secretsmanager) | A SPIRE UpstreamAuthority plugin that reads its intermediate CA from Secrets Manager at every mint, with a validated local cache. | static binaries (linux/amd64, linux/arm64) and the image `quay.io/palermo/spire-upstream-secretsmanager` |
 | **kms-intermediate-rotator** | [`rotator/`](rotator) | A Secrets Manager rotation Lambda that issues a name-constrained intermediate CA signed by a KMS key. | `kms-intermediate-rotator_<version>_linux_<arch>.zip` |
 | **intermediate-ca/v1** | [`intermediateca/`](intermediateca) | The secret format the two share: a JSON document, its protobuf schema, and the Go package that reads and writes it. | the Go package `github.com/bpalermo/spire-upstream-secretsmanager/intermediateca` |
 
@@ -651,7 +651,7 @@ resource "aws_secretsmanager_secret_rotation" "intermediate" {
 
 The release publishes static plugin binaries for linux/amd64 and linux/arm64,
 listed in `checksums.txt` (the SHA-256 is SPIRE's `plugin_checksum`), and a
-multi-arch image `ghcr.io/bpalermo/spire-upstream-secretsmanager` that contains
+multi-arch image `quay.io/palermo/spire-upstream-secretsmanager` that contains
 only `/upstream-secretsmanager` (no shell, no libc). The checksum differs per
 architecture; use the one of the nodes the server runs on.
 
@@ -667,8 +667,8 @@ spire-server:
     upstreamAuthority:
       secretsmanager:
         image:
-          registry: ghcr.io
-          repository: bpalermo/spire-upstream-secretsmanager
+          registry: quay.io
+          repository: palermo/spire-upstream-secretsmanager
           tag: "<version>"
         plugin_cmd: /upstream-secretsmanager
         plugin_checksum: "<SHA-256 of upstream-secretsmanager for the nodes' architecture>"
@@ -700,7 +700,7 @@ spec:
   volumes:
     - name: upstream-secretsmanager
       image:
-        reference: ghcr.io/bpalermo/spire-upstream-secretsmanager:<version>
+        reference: quay.io/palermo/spire-upstream-secretsmanager:<version>
         pullPolicy: IfNotPresent
 ```
 
@@ -715,7 +715,7 @@ with mode 0755 and exits.
 ```yaml
 services:
   install-upstream-secretsmanager:
-    image: ghcr.io/bpalermo/spire-upstream-secretsmanager:<version>
+    image: quay.io/palermo/spire-upstream-secretsmanager:<version>
     command: ["install", "/plugins"]
     volumes:
       - plugins:/plugins
@@ -750,8 +750,9 @@ on the GitHub Release:
 - an SBOM, `spire-upstream-secretsmanager_<version>_sbom.spdx.json`, signed
   the same way;
 
-and pushes the multi-arch plugin image, signed with cosign (the index and
-each platform's manifest). The release notes list the plugin's
+and pushes the multi-arch plugin image to Quay
+(`quay.io/palermo/spire-upstream-secretsmanager`), signed with cosign (the
+index and each platform's manifest; the signatures are OCI referrers). The release notes list the plugin's
 `plugin_checksum` for each architecture, the image digest and the SHA-256 of
 each Lambda archive. Every binary reports the tag with `--version`. The Go
 package `intermediateca` is versioned by the same tag.

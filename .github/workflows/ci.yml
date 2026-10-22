@@ -95,7 +95,13 @@ jobs:
             //upstream-secretsmanager:upstream-secretsmanager_linux_arm64
             //rotator:zip_linux_amd64
             //rotator:zip_linux_arm64
-            //bazel/cosign:cosign)'
+            //bazel/cosign:cosign
+            //bazel/cosign:verify_image)'
+
+      # The registry is one setting, bazel/registry.bzl: the workflows read it
+      # through bazel/registry.sh, and nothing else may spell it out.
+      - name: The registry is one setting
+        run: bazel/check-registry-config.sh
 
       # buf lint (buf.yaml's STANDARD and COMMENTS rules) and the committed
       # .pb.go files being what their .proto files generate, for every proto

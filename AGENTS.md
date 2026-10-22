@@ -173,7 +173,11 @@ Shared:
   (`verifiers/run.sh`). Findings in `verifiers/RESULTS.md`.
 - `bazel/`: `workspace_status.sh` (stamping from `VERSION` and git tags),
   `ci-impacted-targets.sh` (bazel-diff target determination), `registry.bzl`
-  (where the image is published, named once), `image/defs.bzl` (`go_image`),
+  (where the image is published, named once; `registry.sh` reads it for shell
+  and workflows, `check-registry-config.sh` fails CI on the coordinate spelled
+  out elsewhere), `verify-image-signatures.sh` and `registry-lib.sh` (verify
+  a pushed image's signatures and that they are referrers, run as
+  `//bazel/cosign:verify_image`), `image/defs.bzl` (`go_image`),
   `proto/` (the committed-generated-code macro and `breaking.sh`), `lint/`
   (shellcheck and gocognit aspects), `nogo/` (staticcheck analyzers),
   `format/` (gofumpt, shfmt, buildifier, buf format), `cosign/` (the pinned
@@ -205,7 +209,11 @@ runtime and the generated `buf/validate` Go package come from go.mod. Keep the
 
 ## Images, archives and versions
 
-The image `ghcr.io/bpalermo/spire-upstream-secretsmanager` has no base image:
+The image `<IMAGE_REGISTRY>/<IMAGE_NAMESPACE>/spire-upstream-secretsmanager`
+(Quay; `bazel/registry.bzl` is the one setting, `bazel/registry.sh` reads it
+for shell and the workflows, and `bazel/check-registry-config.sh` fails CI on
+the coordinate spelled out anywhere but there and the README) has no base
+image:
 its only content is the plugin binary at `/upstream-secretsmanager`, mode
 0755, so it has no shell and no libc. SPIRE server pods mount it as a
 Kubernetes image volume and exec the file, so keep the binary statically
@@ -223,7 +231,9 @@ commit is a snapshot (`bazel/workspace_status.sh`). The tag triggers
 writes `checksums.txt` over all of them (SPIRE's `plugin_checksum` is the
 SHA-256 of the plugin binary; the release notes list it per architecture,
 with the archives' SHA-256s and the image digest), an SBOM and cosign keyless
-signatures, pushes and signs the image, and creates the GitHub Release. The Go
+signatures, pushes the image to Quay (job environment `release`, robot
+account secrets `QUAY_USERNAME`/`QUAY_TOKEN`) and signs it, and creates the
+GitHub Release. The Go
 module version of `intermediateca` is the same tag. Keep `RELEASE_PLATFORMS`
 in `release.yml` equal to the platform lists of `upstream-secretsmanager/` and
 `rotator/`, and the query in `ci.yml` equal to what `release.yml` builds. Do

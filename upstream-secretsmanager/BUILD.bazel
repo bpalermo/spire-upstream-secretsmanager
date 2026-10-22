@@ -42,7 +42,7 @@ go_image(
     load_tag = "localhost/spire-upstream-secretsmanager:dev",
     path = "/upstream-secretsmanager",
     registry = IMAGE_REGISTRY,
-    repository = image_repository(),
+    repository = image_repository("spire-upstream-secretsmanager"),
 )
 
 # The release binaries (release.yml attaches them to the GitHub Release of a

@@ -240,6 +240,44 @@ CAs; `min_remaining` sets the point where the plugin stops using it. Choose
 `min_remaining` at least as large as SPIRE's `ca_ttl` if every CA must get its
 full lifetime.
 
+### Cold start / seeding the cache
+
+The plugin makes no AWS call at Configure. Every `MintX509CA` fetches
+`AWSCURRENT`, validates it, and writes it to `cache_path` (atomically, mode
+0600); the cache is what lets a server mint while Secrets Manager is
+unreachable. A server that starts with no valid cache and cannot reach AWS
+has nothing to mint with: every mint fails and SPIRE keeps retrying. That is
+a deadlock when the server's AWS credentials depend on that same server, for
+example a workload identity that needs an SVID it issues.
+
+To break it, seed the cache before the first start: write the secret, wrapped
+in a `CacheEntry`, to `cache_path`, mode 0600, owned by the uid the SPIRE
+server runs as. For a secret in format v1 the entry is
+`{"secret": <the secret's SecretString, as a JSON object>}`:
+
+```bash
+cache=/opt/spire/data/server/upstream-secretsmanager.json
+(
+  umask 077
+  aws secretsmanager get-secret-value \
+    --secret-id arn:aws:secretsmanager:us-east-1:111122223333:secret:example \
+    --query SecretString --output text |
+    jq '{secret: .}' >"${cache}"
+)
+chown <server uid>:<server gid> "${cache}"
+```
+
+The SecretString goes in as an object (`jq '{secret: .}'`), not as a string
+(`jq -Rs`), which is not a cache entry. The cache is read more strictly than
+the secret: a SecretString with a field outside the format (the rotator
+writes none) makes the seeded file one that is ignored with a warning. A
+seeded entry is validated at Configure and at every use exactly as a cached
+one (the root pin, `min_remaining`, the trust domain), and the first
+successful mint replaces it. The file holds the private key: pipe it as
+above rather than leaving a copy elsewhere. With the `awssecret` layout the
+entry also needs `upstream_bundle`; copy a cache file a server has written
+instead of building one.
+
 ## kms-intermediate-rotator: the rotation Lambda
 
 An AWS Secrets Manager rotation Lambda that keeps a name-constrained
@@ -756,7 +794,9 @@ One version for everything (`VERSION`). Pushing a tag `v<VERSION>` (or
   plugin binaries, statically linked and reporting the tag with `--version`;
 - `kms-intermediate-rotator_<version>_linux_amd64.zip` and `_linux_arm64.zip`,
   each holding one statically linked executable, `bootstrap`;
-- `checksums.txt` (SHA-256 of all four), signed keyless with cosign
+- `<file>.spdx.json`, an SPDX SBOM of each of those four (syft, from the Go
+  build information: the modules and the Go version linked in);
+- `checksums.txt` (SHA-256 of all eight), signed keyless with cosign
   (`checksums.txt.sigstore.json`);
 
 and pushes the multi-arch plugin image,

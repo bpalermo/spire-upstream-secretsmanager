@@ -101,6 +101,27 @@ func TestFileFormat(t *testing.T) {
 	}
 }
 
+// A cache seeded by hand, as the README's cold-start section does it with
+// `jq '{secret: .}'` over the secret's SecretString, loads.
+func TestLoadSeededFromSecretString(t *testing.T) {
+	v1 := testpki.New(t, testpki.Options{Middle: 1}).V1(t)
+	a, err := secret.ParseV1([]byte(v1), time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "cache.json")
+	if err := os.WriteFile(path, []byte(`{"secret": `+v1+`}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cache.Load(path, vo(a, time.Now(), time.Hour))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !got.Cert.Equal(a.Cert) || !got.Root.Equal(a.Root) {
+		t.Fatal("Load returned other certificates")
+	}
+}
+
 func TestAWSSecretBundleRoundTrip(t *testing.T) {
 	now := time.Now()
 	p := testpki.New(t, testpki.Options{Middle: 1})

@@ -3,10 +3,10 @@ name: release
 # A tag v<VERSION> or v<VERSION>-rc.<n> on a commit of main publishes that
 # release of the plugin and the rotator, under the one version: the plugin
 # binaries, the plugin's multi-arch image, the rotator Lambda's zip archives,
-# checksums.txt over the binaries and the archives, the cosign keyless
-# signatures, and the GitHub Release that lists them. Who may create such a
-# tag, and that it can never be moved or deleted, is the repository's tag
-# rulesets'.
+# an SPDX SBOM of each binary and archive, checksums.txt over all of them,
+# the cosign keyless signatures, and the GitHub Release that lists them. Who
+# may create such a tag, and that it can never be moved or deleted, is the
+# repository's tag rulesets'.
 on:
   push:
     tags: ["v*"]
@@ -26,6 +26,12 @@ env:
   # upstream-secretsmanager_<platform> targets) and of //rotator (the
   # zip_<platform> targets).
   RELEASE_PLATFORMS: linux_amd64 linux_arm64
+  # syft writes the SBOMs, from the Go build information in each binary. The
+  # release archive is checked against this SHA-256, from syft's own
+  # syft_<version>_checksums.txt.
+  SYFT_VERSION: 1.54.1
+  SYFT_SHA256: c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
+  SYFT_CHECK_FOR_APP_UPDATE: "false"
 
 # Credentials are a Quay robot account, secrets QUAY_USERNAME / QUAY_TOKEN of
 # the `release` environment. The robot can write the repository and cannot
@@ -118,14 +124,29 @@ jobs:
             //upstream-secretsmanager:image_push //upstream-secretsmanager:image_index \
             //bazel/cosign
 
+      # A pinned, checksummed release binary rather than an action, for the
+      # reason the actions are pinned: this job can sign.
+      - name: Install syft
+        run: |
+          set -euo pipefail
+          archive="syft_${SYFT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLo "${RUNNER_TEMP}/${archive}" \
+            "https://github.com/anchore/syft/releases/download/v${SYFT_VERSION}/${archive}"
+          echo "${SYFT_SHA256}  ${RUNNER_TEMP}/${archive}" | sha256sum -c -
+          mkdir -p "${RUNNER_TEMP}/syft"
+          tar -xzf "${RUNNER_TEMP}/${archive}" -C "${RUNNER_TEMP}/syft" syft
+          echo "${RUNNER_TEMP}/syft" >> "${GITHUB_PATH}"
+
       # The plugin binaries are named upstream-secretsmanager_<version>_<os>_<arch>
       # and the Lambda archives kms-intermediate-rotator_<version>_linux_<arch>.zip,
       # the version without its v, beside checksums.txt in sha256sum's format.
       # SPIRE's plugin_checksum is the SHA-256 of the binary, so each plugin
-      # line of checksums.txt is the value for that architecture. All come
+      # line of checksums.txt is the value for that architecture. Each binary
+      # and archive has an SPDX SBOM beside it, <file>.spdx.json, which
+      # checksums.txt covers too. All come
       # from one stamped build; the linux/amd64 plugin, which this runner can
       # run, must report the tag, or nothing is signed.
-      - name: Collect the binaries, the archives and their checksums
+      - name: Collect the binaries, the archives, their SBOMs and their checksums
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
@@ -152,7 +173,10 @@ jobs:
             echo "::error::the plugin reports '${got}', want 'upstream-secretsmanager ${GITHUB_REF_NAME}'" >&2
             exit 1
           fi
-          (cd dist && sha256sum upstream-secretsmanager_*_linux_* kms-intermediate-rotator_*_linux_*.zip >checksums.txt)
+          for f in dist/upstream-secretsmanager_* dist/kms-intermediate-rotator_*; do
+            syft scan "file:${f}" --quiet --source-version "${version}" -o "spdx-json=${f}.spdx.json"
+          done
+          (cd dist && sha256sum upstream-secretsmanager_* kms-intermediate-rotator_* >checksums.txt)
           cat dist/checksums.txt
 
       # cosign 3 writes the signature, its certificate and the transparency
@@ -255,9 +279,10 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          want="$(printf '%s\n' checksums.txt checksums.txt.sigstore.json \
-            "upstream-secretsmanager_${version}_linux_amd64" "upstream-secretsmanager_${version}_linux_arm64" \
-            "kms-intermediate-rotator_${version}_linux_amd64.zip" "kms-intermediate-rotator_${version}_linux_arm64.zip" | sort)"
+          files=("upstream-secretsmanager_${version}_linux_amd64" "upstream-secretsmanager_${version}_linux_arm64"
+            "kms-intermediate-rotator_${version}_linux_amd64.zip" "kms-intermediate-rotator_${version}_linux_arm64.zip")
+          want="$(printf '%s\n' checksums.txt checksums.txt.sigstore.json "${files[@]}" \
+            "${files[@]/%/.spdx.json}" | sort)"
           got="$(find dist -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)"
           if [ "${got}" != "${want}" ]; then
             echo "::error::the release artifact holds:" >&2
@@ -343,8 +368,8 @@ jobs:
           ## Verify
 
           The image, its platform manifests and \`checksums.txt\` (which lists
-          the plugin binaries and the Lambda archives) are signed by this
-          release's workflow run:
+          the plugin binaries, the Lambda archives and the SPDX SBOM of each,
+          \`<file>.spdx.json\`) are signed by this release's workflow run:
 
           \`\`\`bash
           cosign verify ${IMAGE} \\

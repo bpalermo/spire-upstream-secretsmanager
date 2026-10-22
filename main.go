@@ -21,7 +21,7 @@ import (
 	configv1 "github.com/spiffe/spire-plugin-sdk/proto/spire/service/common/config/v1"
 
 	"github.com/bpalermo/spire-upstream-secretsmanager/common/version"
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/plugin"
+	"github.com/bpalermo/spire-upstream-secretsmanager/plugin"
 )
 
 const name = "upstream-secretsmanager"

@@ -8,11 +8,11 @@ go_test(
     srcs = ["spireserver_test.go"],
     args = [
         "--spire_server=$(rlocationpath :spire_server)",
-        "--plugin=$(rlocationpath //cmd/upstream-secretsmanager)",
+        "--plugin=$(rlocationpath //:upstream-secretsmanager)",
     ],
     data = [
         ":spire_server",
-        "//cmd/upstream-secretsmanager",
+        "//:upstream-secretsmanager",
     ],
     target_compatible_with = ["@platforms//os:linux"],
     deps = [

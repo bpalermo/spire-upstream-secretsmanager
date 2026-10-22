@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"github.com/bpalermo/spire-upstream-secretsmanager/internal/testpki"
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/upstreamca"
+	"github.com/bpalermo/spire-upstream-secretsmanager/upstreamca"
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 )
 

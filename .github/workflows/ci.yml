@@ -80,10 +80,10 @@ jobs:
       - name: the release targets exist
         run: |
           bazel query --config=ci --noshow_progress 'set(
-            //cmd/upstream-secretsmanager:image_push
-            //cmd/upstream-secretsmanager:image_index
-            //cmd/upstream-secretsmanager:upstream-secretsmanager_linux_amd64
-            //cmd/upstream-secretsmanager:upstream-secretsmanager_linux_arm64
+            //:image_push
+            //:image_index
+            //:upstream-secretsmanager_linux_amd64
+            //:upstream-secretsmanager_linux_arm64
             //bazel/cosign:cosign)'
 
   # Target determination. bazel-diff hashes the build graph at the base and at

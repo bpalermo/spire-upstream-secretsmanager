@@ -17,15 +17,15 @@ trap 'rm -rf "${work}"' EXIT
 # The candidate lists, as the queries would answer them: the buildable rules
 # (no `manual` rule, so no //:gazelle) and the tests `bazel test //...` runs.
 cat >"${work}/rules.txt" <<'EOF'
-//cmd/upstream-secretsmanager:image_load
-//cmd/upstream-secretsmanager:image_push
-//cmd/upstream-secretsmanager:upstream-secretsmanager
-//cmd/upstream-secretsmanager:upstream-secretsmanager_test
+//:image_load
+//:image_push
+//:upstream-secretsmanager
+//:spire-upstream-secretsmanager_test
 //common/version:version
 //common/version:version_test
 EOF
 cat >"${work}/tests.txt" <<'EOF'
-//cmd/upstream-secretsmanager:upstream-secretsmanager_test
+//:spire-upstream-secretsmanager_test
 //common/version:version_test
 EOF
 
@@ -75,24 +75,24 @@ check_flag() { # case name got want
 # flag false, and it is the classification saying so, not a failure.
 expect nothing "" "" ""
 
-# A change under cmd/upstream-secretsmanager: its library, binary, test and
-# image. Source-file labels (//cmd/upstream-secretsmanager:main.go) and a
+# A change to the root package: its library, binary, test and
+# image. Source-file labels (//:main.go) and a
 # `manual` rule (//:gazelle) are in no candidate list and are dropped.
 expect binary "//:gazelle
-//cmd/upstream-secretsmanager:image_index
-//cmd/upstream-secretsmanager:image_load
-//cmd/upstream-secretsmanager:image_push
-//cmd/upstream-secretsmanager:main.go
-//cmd/upstream-secretsmanager:upstream-secretsmanager
-//cmd/upstream-secretsmanager:upstream-secretsmanager_test
-" "//cmd/upstream-secretsmanager:image_load
-//cmd/upstream-secretsmanager:image_push
-//cmd/upstream-secretsmanager:upstream-secretsmanager
-//cmd/upstream-secretsmanager:upstream-secretsmanager_test" "//cmd/upstream-secretsmanager:upstream-secretsmanager_test"
+//:image_index
+//:image_load
+//:image_push
+//:main.go
+//:upstream-secretsmanager
+//:spire-upstream-secretsmanager_test
+" "//:image_load
+//:image_push
+//:upstream-secretsmanager
+//:spire-upstream-secretsmanager_test" "//:spire-upstream-secretsmanager_test"
 
 # A rule that is not a test: built, nothing tested.
-expect image "//cmd/upstream-secretsmanager:image_load
-" "//cmd/upstream-secretsmanager:image_load" ""
+expect image "//:image_load
+" "//:image_load" ""
 
 # Labels in no candidate list (an external target, a removed-looking label):
 # nothing to build, and still a classification.

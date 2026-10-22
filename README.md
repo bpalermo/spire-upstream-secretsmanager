@@ -192,7 +192,7 @@ Everything is built with [Bazel](https://bazel.build) (bzlmod); the version is p
 ```bash
 bazel build //...                                  # the plugin binary and the image
 bazel test //...                                   # unit tests, and a real SPIRE server against a fake Secrets Manager
-bazel run //cmd/upstream-secretsmanager -- --version
+bazel run //:upstream-secretsmanager -- --version
 bazel run //:gazelle                               # after adding, removing or renaming Go files
 bazel run //:format                                # format Go, Starlark and shell
 bazel build --config=ci //...                      # what CI builds: static analysis, shellcheck, gocognit
@@ -201,14 +201,14 @@ bazel build --config=ci //...                      # what CI builds: static anal
 Release binaries for the two supported platforms, statically linked and stamped with the version:
 
 ```bash
-bazel build //cmd/upstream-secretsmanager:upstream-secretsmanager_linux_amd64 \
-            //cmd/upstream-secretsmanager:upstream-secretsmanager_linux_arm64
+bazel build //:upstream-secretsmanager_linux_amd64 \
+            //:upstream-secretsmanager_linux_arm64
 ```
 
 The OCI image (`ghcr.io/bpalermo/spire-upstream-secretsmanager`, multi-arch) contains only the binary, at `/upstream-secretsmanager`, so that it can be mounted into a SPIRE server pod as a Kubernetes image volume. Load it into a local Docker daemon with:
 
 ```bash
-bazel run //cmd/upstream-secretsmanager:image_load
+bazel run //:image_load
 ```
 
 ## Releases
@@ -217,4 +217,4 @@ Pushing a tag `v<VERSION>` (see `VERSION`) publishes the binaries, `checksums.tx
 
 ## License
 
-Apache-2.0, see [LICENSE](LICENSE). The CSR signing (`pkg/upstreamca`) and parts of the plugin are adapted from [SPIRE](https://github.com/spiffe/spire) v1.15.5, also Apache-2.0, as noted in the source.
+Apache-2.0, see [LICENSE](LICENSE). The CSR signing (`upstreamca`) and parts of the plugin are adapted from [SPIRE](https://github.com/spiffe/spire) v1.15.5, also Apache-2.0, as noted in the source.

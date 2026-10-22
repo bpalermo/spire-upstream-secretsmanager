@@ -10,9 +10,9 @@ import (
 
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 
+	"github.com/bpalermo/spire-upstream-secretsmanager/cache"
 	"github.com/bpalermo/spire-upstream-secretsmanager/internal/testpki"
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/cache"
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/secret"
+	"github.com/bpalermo/spire-upstream-secretsmanager/secret"
 )
 
 var td = spiffeid.RequireTrustDomainFromString("example.org")

@@ -27,9 +27,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/cache"
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/secret"
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/upstreamca"
+	"github.com/bpalermo/spire-upstream-secretsmanager/cache"
+	"github.com/bpalermo/spire-upstream-secretsmanager/secret"
+	"github.com/bpalermo/spire-upstream-secretsmanager/upstreamca"
 )
 
 // Plugin implements the UpstreamAuthority and Config services.

@@ -27,7 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/bpalermo/spire-upstream-secretsmanager/internal/testpki"
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/plugin"
+	"github.com/bpalermo/spire-upstream-secretsmanager/plugin"
 )
 
 const (

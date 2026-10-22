@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/secret"
+	"github.com/bpalermo/spire-upstream-secretsmanager/secret"
 )
 
 // Save writes a to path atomically, with mode 0600: the JSON goes to a

@@ -27,7 +27,7 @@ bazel run //:gazelle              # after adding, removing or renaming any .go f
 bazel run //:format               # format Go, Starlark and shell; CI runs //:format.check
 bazel mod tidy                    # after changing go.mod or a bazel_dep
 bazel build --config=ci //...     # what CI builds: lockfile must be current, shellcheck and gocognit on
-bazel run //cmd/upstream-secretsmanager -- --version
+bazel run //:upstream-secretsmanager -- --version
 ```
 
 Add a Go dependency with `bazel run @rules_go//go -- get <module>@<version>`,
@@ -41,16 +41,16 @@ the public proxy; a `Duplicate rc file: user.bazelrc` warning is harmless.
 
 ## Layout
 
-- `cmd/upstream-secretsmanager/`: the plugin binary (`go_binary`, pure Go, CGO
+- `main.go` (root package): the plugin binary (`go_binary`, pure Go, CGO
   off), its release builds for linux/amd64 and linux/arm64
   (`upstream-secretsmanager_linux_<arch>`) and its image.
-- `pkg/plugin/`: the plugin (Configure, Validate, MintX509CAAndSubscribe), its
+- `plugin`: the plugin (Configure, Validate, MintX509CAAndSubscribe), its
   HCL configuration and the AWS client, behind the narrow `SecretsClient`
   interface so tests use fakes.
-- `pkg/secret/`: parsing and validation of format v1 and of the awssecret
+- `secret`: parsing and validation of format v1 and of the awssecret
   three-secret layout.
-- `pkg/cache/`: the on-disk cache (atomic 0600 write, load and validate).
-- `pkg/upstreamca/`: CSR signing, adapted from SPIRE's `x509svid.UpstreamCA`.
+- `cache`: the on-disk cache (atomic 0600 write, load and validate).
+- `upstreamca`: CSR signing, adapted from SPIRE's `x509svid.UpstreamCA`.
 - `internal/testpki/`, `internal/fakesm/` (testonly): test certificate
   hierarchies and an in-process fake Secrets Manager (HTTP).
 - `integration/spireserver/`: runs the SPIRE server release pinned in

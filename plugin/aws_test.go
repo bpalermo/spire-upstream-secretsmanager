@@ -12,7 +12,7 @@ import (
 
 	"github.com/bpalermo/spire-upstream-secretsmanager/internal/fakesm"
 	"github.com/bpalermo/spire-upstream-secretsmanager/internal/testpki"
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/plugin"
+	"github.com/bpalermo/spire-upstream-secretsmanager/plugin"
 )
 
 // isolateAWSEnv points the AWS SDK at static test credentials and away from

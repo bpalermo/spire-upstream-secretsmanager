@@ -15,7 +15,7 @@ import (
 	"github.com/spiffe/go-spiffe/v2/spiffeid"
 	"github.com/spiffe/go-spiffe/v2/svid/x509svid"
 
-	"github.com/bpalermo/spire-upstream-secretsmanager/pkg/upstreamca"
+	"github.com/bpalermo/spire-upstream-secretsmanager/upstreamca"
 )
 
 // probe signs a throwaway SPIRE CA for the trust domain with the

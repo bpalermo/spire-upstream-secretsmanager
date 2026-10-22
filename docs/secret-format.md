@@ -9,9 +9,9 @@ separately and read each other's data for years, and implementations in other
 languages are expected: this document is normative,
 `intermediateca/v1/secret.proto` is its machine-readable schema, and
 `intermediateca/testdata/` holds documents every implementation must accept or
-refuse. The Go package `intermediateca`
-(`github.com/bpalermo/spire-upstream-secretsmanager/intermediateca`) is the
-reference implementation.
+refuse. The Go package `intermediateca` is the in-repo implementation used by
+the rotator and the plugin (built with Bazel; its generated code is not
+committed).
 
 The key words MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 

@@ -25,7 +25,7 @@ bazel_dep(name = "rules_shell", version = "0.8.0")
 # official prebuilt release binary, selected per platform, with its sha256
 # pinned in the module's own lock. //bazel/cosign wraps it so the release
 # workflow and a workstation run the same checksummed cosign; bumping cosign
-# is bumping this bazel_dep (and EXPECTED in //bazel/cosign:version_test).
+# is bumping this bazel_dep.
 bazel_dep(name = "rules_img_signer_cosign", version = "0.0.1")
 
 # proto_library, and protoc to compile the protos for rules_go and buf.

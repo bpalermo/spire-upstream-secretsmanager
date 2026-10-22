@@ -11,9 +11,11 @@ binary, `upstream-secretsmanager`, that the SPIRE server executes. The
 repository is public: no account IDs, ARNs, key IDs, personal domains or
 cluster names anywhere, and examples use `example.org`.
 
-The plugin code is not written yet; `cmd/upstream-secretsmanager/main.go` is a
-placeholder that prints its version. What exists is the build, lint, test and
-release machinery.
+The secret format the plugin reads is `docs/secret-format.md`, the contract
+with the producer (a separate repository, kms-intermediate-rotator); change it
+only together with the producer. Behaviour follows SPIRE's built-in `disk` and
+`awssecret` UpstreamAuthority plugins (v1.15.5) unless the README says
+otherwise.
 
 ## Build and test
 
@@ -42,7 +44,18 @@ the public proxy; a `Duplicate rc file: user.bazelrc` warning is harmless.
 - `cmd/upstream-secretsmanager/`: the plugin binary (`go_binary`, pure Go, CGO
   off), its release builds for linux/amd64 and linux/arm64
   (`upstream-secretsmanager_linux_<arch>`) and its image.
-- `pkg/...`: libraries (to come, e.g. `pkg/secret`, `pkg/cache`, `pkg/plugin`).
+- `pkg/plugin/`: the plugin (Configure, Validate, MintX509CAAndSubscribe), its
+  HCL configuration and the AWS client, behind the narrow `SecretsClient`
+  interface so tests use fakes.
+- `pkg/secret/`: parsing and validation of format v1 and of the awssecret
+  three-secret layout.
+- `pkg/cache/`: the on-disk cache (atomic 0600 write, load and validate).
+- `pkg/upstreamca/`: CSR signing, adapted from SPIRE's `x509svid.UpstreamCA`.
+- `internal/testpki/`, `internal/fakesm/` (testonly): test certificate
+  hierarchies and an in-process fake Secrets Manager (HTTP).
+- `integration/spireserver/`: runs the SPIRE server release pinned in
+  MODULE.bazel (`@spire_linux_<arch>`, checksummed) with the plugin against
+  the fake Secrets Manager. No network beyond loopback.
 - `common/version/`: the version, stamped at link time from the workspace
   status.
 - `bazel/`: `workspace_status.sh` (stamping from `VERSION` and git tags),

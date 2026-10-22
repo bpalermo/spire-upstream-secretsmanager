@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "fakesm",
+    testonly = True,
+    srcs = ["fakesm.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/internal/fakesm",
+    visibility = ["//:__subpackages__"],
+)

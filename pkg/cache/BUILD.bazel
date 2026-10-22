@@ -1,0 +1,19 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "cache",
+    srcs = ["cache.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/pkg/cache",
+    visibility = ["//visibility:public"],
+    deps = ["//pkg/secret"],
+)
+
+go_test(
+    name = "cache_test",
+    srcs = ["cache_test.go"],
+    deps = [
+        ":cache",
+        "//internal/testpki",
+        "//pkg/secret",
+    ],
+)

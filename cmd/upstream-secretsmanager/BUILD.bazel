@@ -8,7 +8,13 @@ go_library(
     srcs = ["main.go"],
     importpath = "github.com/bpalermo/spire-upstream-secretsmanager/cmd/upstream-secretsmanager",
     visibility = ["//visibility:private"],
-    deps = ["//common/version"],
+    deps = [
+        "//common/version",
+        "//pkg/plugin",
+        "@com_github_spiffe_spire_plugin_sdk//pluginmain",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/plugin/server/upstreamauthority/v1:upstreamauthority",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/service/common/config/v1:config",
+    ],
 )
 
 go_binary(

@@ -1,0 +1,9 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "fixedpki",
+    testonly = True,
+    srcs = ["fixedpki.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/internal/fixedpki",
+    visibility = ["//:__subpackages__"],
+)

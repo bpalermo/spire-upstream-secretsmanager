@@ -4,108 +4,253 @@ Guidance for agents working in this repository.
 
 ## What this is
 
-A SPIRE UpstreamAuthority plugin that reads its intermediate CA from AWS
-Secrets Manager at every mint, with a validated local cache. It is an external
-plugin (built on `github.com/spiffe/spire-plugin-sdk`): one statically linked
-binary, `upstream-secretsmanager`, that the SPIRE server executes. The
-repository is public: no account IDs, ARNs, key IDs, personal domains or
-cluster names anywhere, and examples use `example.org`.
+Three components that are built, tested and released together, from one Go
+module (`github.com/bpalermo/spire-upstream-secretsmanager`) and one Bazel
+module:
 
-The secret format the plugin reads is `docs/secret-format.md`, the contract
-with the producer (a separate repository, kms-intermediate-rotator); change it
-only together with the producer. Behaviour follows SPIRE's built-in `disk` and
-`awssecret` UpstreamAuthority plugins (v1.15.5) unless the README says
-otherwise.
+- **The plugin** (`upstream-secretsmanager/`): a SPIRE UpstreamAuthority
+  plugin that reads its intermediate CA from AWS Secrets Manager at every
+  mint, with a validated local cache. An external plugin (built on
+  `github.com/spiffe/spire-plugin-sdk`): one statically linked binary,
+  `upstream-secretsmanager`, that the SPIRE server executes. Behaviour follows
+  SPIRE's built-in `disk` and `awssecret` UpstreamAuthority plugins (v1.15.5)
+  unless the README says otherwise.
+- **The rotator** (`rotator/`): an AWS Lambda that implements Secrets Manager
+  rotation for a name-constrained intermediate CA signed by an AWS KMS key.
+  It is generic: nothing in it depends on the plugin.
+- **The secret format** (`intermediateca/`): `intermediate-ca/v1`, the JSON
+  document the rotator writes and the plugin reads, its protobuf schema with
+  protovalidate rules, and the Go package `intermediateca` that reads and
+  writes it. `docs/secret-format.md` is the specification and is
+  authoritative; the proto and the Go code follow it.
+
+They replace three repositories (spire-upstream-secretsmanager,
+kms-intermediate-rotator, intermediate-ca-format); the last two are
+superseded and kept only for their history.
+
+The repository is public: no account IDs, ARNs, key IDs, personal domains,
+host or cluster names anywhere (code, tests, testdata, docs, workflows).
+Examples use `example.org` and the account `111122223333`. No secrets. The
+keys in `intermediateca/testdata/` are derived from public labels and protect
+nothing.
+
+**Format version 1 is frozen**: nothing in `intermediateca/v1/secret.proto` is
+renamed, renumbered, retyped or removed, and no rule changes what is accepted.
+A change that needs one of those is `intermediate-ca/v2` in a new package
+`intermediateca/v2`. `buf breaking` enforces it for the schema and the golden
+files in `intermediateca/testdata/` for the rules. Use `intermediateca.Encode`
+and `Decode`/`DecodeAt`; never parse or write the secret by hand.
+
+The rotator's configuration schema (`config/v1/config.proto`) is read by
+Lambdas deployed separately from whoever writes their configuration, so a
+configuration that parses today must keep parsing: no field renamed, retyped
+or removed (buf's `WIRE_JSON` rules). Tighten a rule only on purpose, and say
+so in the pull request.
+
+Nothing reaches AWS in a test: KMS, Secrets Manager and SSM are in-process
+fakes backed by real keys (`internal/kmsfake`, `internal/fakesm`, the fakes in
+`rotation`'s and `config`'s tests). Keep it that way.
 
 ## Build and test
 
-Never run the host `go` tool: Bazel downloads the pinned SDK (from `go.mod`).
+Bazel is the only build. Never run the host `go` tool, and do not "fix" go.mod
+with a host `go mod tidy`: Bazel downloads the pinned SDK (from `go.mod`).
 
 ```bash
-bazel test //...                  # builds and runs the unit tests
-bazel run //:gazelle              # after adding, removing or renaming any .go file
-bazel run //:format               # format Go, Starlark and shell; CI runs //:format.check
-bazel mod tidy                    # after changing go.mod or a bazel_dep
-bazel build --config=ci //...     # what CI builds: lockfile must be current, shellcheck and gocognit on
-bazel run //:upstream-secretsmanager -- --version
+bazel test //...                          # unit tests, buf lint, SPIRE + e2e
+bazel run //:gazelle                      # after adding, removing or renaming any .go file
+bazel run //:format                       # Starlark, Go, shell and protos; CI runs //:format.check
+bazel mod tidy                            # after changing go.mod or a bazel_dep
+bazel build --config=ci //...             # what CI builds: lockfile must be current, shellcheck and gocognit on
+bazel/proto/breaking.sh                   # buf breaking of every proto against origin/main
+bazel run //internal/gentestdata          # regenerate intermediateca/testdata after adding or changing a case
+bazel run //upstream-secretsmanager -- --version
+bazel run //rotator -- --version
 ```
 
-Add a Go dependency with `bazel run @rules_go//go -- get <module>@<version>`,
-then `bazel mod tidy`, then `bazel run //:gazelle`. A dependency whose
+Change a Go dependency through rules_go's SDK:
+
+```bash
+bazel run @rules_go//go -- get github.com/some/module@v1.2.3
+```
+
+Follow it with `bazel mod tidy` and `bazel run //:gazelle`. A dependency whose
 checked-in BUILD files regenerate Go from `.proto` sources (the SPIRE plugin
-SDK is one) needs a `go_deps.gazelle_override` with
-`gazelle:proto disable_global` in MODULE.bazel, as the other repositories do.
+SDK is one) needs a `go_deps.gazelle_override` with `gazelle:proto
+disable_global` in MODULE.bazel; `cel.dev/cel-go` (protovalidate's expression
+engine) needs one too, because its BUILD files name every library
+`go_default_library`. The protos' Go is generated by Bazel and not committed,
+so `go mod tidy` needs `-e` to get past the packages it cannot find.
 
 `user.bazelrc` is local and untracked. It points Bazel's Go module fetches at
 the public proxy; a `Duplicate rc file: user.bazelrc` warning is harmless.
 
+Linting is part of the build. Every Go package is compiled with the analyzers
+of `//:nogo` (`go vet`'s, the rest of the x/tools set and staticcheck's), and
+a finding is a compile error: fix it rather than excluding the file. Shell
+scripts are checked by shellcheck and Go functions by gocognit, both aspects
+that `--config=ci` turns on; a script is only seen through a Bazel target
+(`//bazel:scripts`, `//bazel/proto:scripts`). gocognit
+(`bazel/lint/linters.bzl`) fails a function over 15 and visits production
+code only; the threshold never goes up.
+
 ## Layout
 
-- `main.go` (root package): the plugin binary (`go_binary`, pure Go, CGO
-  off), its release builds for linux/amd64 and linux/arm64
-  (`upstream-secretsmanager_linux_<arch>`) and its image.
-- `plugin`: the plugin (Configure, Validate, MintX509CAAndSubscribe), its
-  HCL configuration and the AWS client, behind the narrow `SecretsClient`
+No `cmd/`, no `pkg/` and no root package: each binary has its own top-level
+directory, libraries are top-level directories, and `internal/` holds the
+version and the test helpers.
+
+Binaries:
+
+- `upstream-secretsmanager/`: the plugin binary (`go_binary`, pure Go, CGO
+  off), its release builds (`upstream-secretsmanager_linux_<arch>`), its
+  image (`image_*`) and `release_binaries_test` (static, right machine).
+- `rotator/`: the Lambda: start-up (configuration, the KMS public-key check)
+  and the aws-lambda-go handler. The binary is `//rotator`, named `bootstrap`
+  (`basename`) as the `provided.al2023` runtime requires, built with the
+  `lambda.norpc` tag; its release archives are `zip_linux_<arch>`, checked by
+  `release_zips_test`.
+
+Libraries of the plugin:
+
+- `plugin`: the plugin (Configure, Validate, MintX509CAAndSubscribe), its HCL
+  configuration and the AWS client, behind the narrow `SecretsClient`
   interface so tests use fakes.
-- `secret`: parsing and validation of format v1 and of the awssecret
-  three-secret layout.
+- `secret`: reading the secret (format v1 and the awssecret three-secret
+  layout) and the plugin's own checks (root pin, remaining lifetime, the
+  SPIRE probe).
 - `cache`: the on-disk cache (atomic 0600 write, load and validate).
 - `upstreamca`: CSR signing, adapted from SPIRE's `x509svid.UpstreamCA`.
-- `internal/testpki/`, `internal/fakesm/` (testonly): test certificate
-  hierarchies and an in-process fake Secrets Manager (HTTP).
-- `integration/spireserver/`: runs the SPIRE server release pinned in
-  MODULE.bazel (`@spire_linux_<arch>`, checksummed) with the plugin against
-  the fake Secrets Manager. No network beyond loopback.
+
+Libraries of the rotator:
+
+- `config`: loads (`ROTATOR_CONFIG` or `ROTATOR_CONFIG_PARAMETER`) and
+  validates the configuration: strict protobuf JSON, protovalidate, then the
+  checks against the root certificate.
+- `config/v1`: the configuration schema, `config.proto` (proto package
+  `config.v1`: buf's directory = package rule), and its Go package
+  `configv1`, generated by Bazel.
+- `kmssigner`: a `crypto.Signer` over KMS `Sign` (`DIGEST`), refusing a key
+  whose public key is not the root certificate's.
+- `intermediate`: the intermediate's template, issuance and the check of an
+  issued certificate against its profile.
+- `rotation`: the four rotation steps over a narrow Secrets Manager
+  interface.
+
+The format:
+
+- `intermediateca`: `Bundle`, `Decode`, `DecodeAt`, `Encode`, `RootSHA256`,
+  `RootSHA256Hex` and the `Err*` sentinels. Errors never contain key
+  material; keep it that way (the tests check).
+- `intermediateca/v1`: `secret.proto` (proto package `intermediateca.v1`) and
+  its Go package `intermediatecav1`, generated by Bazel.
+- `intermediateca/testdata/`: golden documents and `manifest.json`, for every
+  implementation.
+- `docs/secret-format.md`: the specification.
+
+Shared:
+
+- `internal/version`: the build version of both binaries, stamped at link
+  time from the workspace status.
+- Test-only (`testonly`): `internal/testpki` (random certificate hierarchies,
+  and the roots the rotator issues under), `internal/fixedpki` (hierarchies
+  with fixed keys, for the golden files), `internal/gentestdata` (writes
+  `intermediateca/testdata`), `internal/kmsfake` (KMS `GetPublicKey`/`Sign`),
+  `internal/fakesm` (Secrets Manager over HTTP, with versions and staging
+  labels), `internal/spiretest` (runs the pinned SPIRE server and its CLI).
+- `integration/spireserver`: the SPIRE server release pinned in MODULE.bazel
+  (`@spire_linux_<arch>`, checksummed) with the plugin against the fake
+  Secrets Manager.
+- `integration/e2e`: the end-to-end test: the rotation code rotates into the
+  fake Secrets Manager, the SPIRE server mints from it, and a second rotation
+  is picked up by the next prepared CA. No network beyond loopback; it runs
+  in normal CI.
 - `verifiers/`: whether real verifiers (Go crypto/x509, Envoy, MySQL, Kafka)
   enforce X.509 name constraints on the intermediate, and whether a kind
   cluster's containerd can exec the plugin from an image volume. Only the Go
   test runs in CI; the others are `manual` and need Docker
   (`verifiers/run.sh`). Findings in `verifiers/RESULTS.md`.
-- `common/version/`: the version, stamped at link time from the workspace
-  status.
 - `bazel/`: `workspace_status.sh` (stamping from `VERSION` and git tags),
   `ci-impacted-targets.sh` (bazel-diff target determination), `registry.bzl`
-  (where the image is published, named once), `image/defs.bzl` (`go_image`),
-  `lint/` (shellcheck and gocognit aspects), `nogo/` (staticcheck analyzers),
-  `format/` (gofumpt, shfmt, buildifier), `cosign/` (the pinned cosign CLI),
-  `platforms/`.
+  (where the image is published, named once; `registry.sh` reads it for shell
+  and workflows, `check-registry-config.sh` fails CI on the coordinate spelled
+  out elsewhere), `verify-image-signatures.sh` and `registry-lib.sh` (verify
+  a pushed image's signatures and that they are referrers, run as
+  `//bazel/cosign:verify_image`), `image/defs.bzl` (`go_image`),
+  `proto/breaking.sh`, `lint/`
+  (shellcheck and gocognit aspects), `nogo/` (staticcheck analyzers),
+  `format/` (gofumpt, shfmt, buildifier, buf format), `cosign/` (the pinned
+  cosign CLI), `platforms/`.
 - `.github/workflows/ci.yml` (pull requests and main) and `release.yml` (tags
   `v*`).
 
-## Static analysis and lint
+## Protos and generated code
 
-- nogo (`//:nogo`) runs `go vet`'s analyzers, the rest of the x/tools set and
-  staticcheck's SA and S checks while compiling this module's packages.
-- `--config=lint` (on in `--config=ci`) runs shellcheck on scripts and gocognit
-  on `go_library` and `go_binary` targets. The gocognit threshold is 15, in
-  `bazel/lint/linters.bzl`; it never goes up.
+Every proto directory follows buf's directory = package rule
+(`intermediateca/v1` is `intermediateca.v1`). buf lint (`//:buf.yaml`:
+`STANDARD` and `COMMENTS`) is a test next to each proto, `*_proto_lint_test`;
+`bazel/proto/breaking.sh` runs buf breaking (`WIRE_JSON`) for every
+`proto_library` of the repository against the commit a change branched from.
 
-## Images and versions
+Generated code is never committed. Gazelle generates each proto's
+`proto_library` and `go_proto_library` (and the `go_library` that embeds it);
+the protovalidate import is resolved by the directives in the root
+`BUILD.bazel`. After changing a proto, `bazel run //:gazelle`. The
+`buf_lint_test` next to each proto is written by hand and Gazelle keeps it.
 
-The image `ghcr.io/bpalermo/spire-upstream-secretsmanager` has no base image:
-its only content is the binary at `/upstream-secretsmanager`, mode 0755, so it
-has no shell and no libc. SPIRE server pods mount it as a Kubernetes image
-volume and exec the file, so keep the binary statically linked (`pure = "on"`).
+protovalidate's proto comes from the BCR module `protovalidate`; its Go
+runtime and the generated `buf/validate` Go package come from go.mod. Keep the
+`protovalidate` bazel_dep and `buf.build/go/protovalidate` in step.
 
-`VERSION` is the release being worked towards. A commit tagged `v<VERSION>` (or
-`v<VERSION>-rc.<n>`) is that release; any other commit is a snapshot. The tag
-triggers `release.yml`, which builds both binaries, writes `checksums.txt`
-(SPIRE's `plugin_checksum` is the SHA-256 of the binary; the release notes list
-it per architecture), an SBOM and cosign keyless signatures, pushes the image,
-and creates the GitHub Release. Do not push tags unless asked.
+## Images, archives and versions
+
+The image `<IMAGE_REGISTRY>/<IMAGE_NAMESPACE>/spire-upstream-secretsmanager`
+(Quay; `bazel/registry.bzl` is the one setting, `bazel/registry.sh` reads it
+for shell and the workflows, and `bazel/check-registry-config.sh` fails CI on
+the coordinate spelled out anywhere but there and the README) has no base
+image:
+its only content is the plugin binary at `/upstream-secretsmanager`, mode
+0755, so it has no shell and no libc. SPIRE server pods mount it as a
+Kubernetes image volume and exec the file, so keep the binary statically
+linked (`pure = "on"`).
+
+The rotator's archives are `pkg_zip`s holding one executable file
+`bootstrap`, mode 0755, with fixed timestamps so the same inputs give the same
+bytes. Their names in Bazel carry no version; `release.yml` copies them to
+`kms-intermediate-rotator_<version>_linux_<arch>.zip`.
+
+One `VERSION` for everything: it is the release being worked towards. A
+commit tagged `v<VERSION>` (or `v<VERSION>-rc.<n>`) is that release; any other
+commit is a snapshot (`bazel/workspace_status.sh`). The tag triggers
+`release.yml`, which builds the plugin binaries and the Lambda archives,
+writes `checksums.txt` over all of them (SPIRE's `plugin_checksum` is the
+SHA-256 of the plugin binary; the release notes list it per architecture,
+with the archives' SHA-256s and the image digest), an SBOM and cosign keyless
+signatures, pushes the image to Quay (job environment `release`, robot
+account secrets `QUAY_USERNAME`/`QUAY_TOKEN`) and signs it, and creates the
+GitHub Release. The Go
+module version of `intermediateca` is the same tag. Keep `RELEASE_PLATFORMS`
+in `release.yml` equal to the platform lists of `upstream-secretsmanager/` and
+`rotator/`, and the query in `ci.yml` equal to what `release.yml` builds. Do
+not push tags unless asked.
 
 ## CI
 
-`ci.yml` has a `diff` job that computes, with bazel-diff, the targets a change
-impacts (`bazel/ci-impacted-targets.sh`), so a documentation-only change builds
-nothing. Anything it cannot decide is a full run. The formatter and Gazelle
-checks always run, in `lint`. The `ci` job is the single required check. The
-bazel-diff seed files in the script (`.bazelrc`, `MODULE.bazel`, the lint
-`.bzl` files, ...) are the CI inputs that no target depends on: add a new one
-there.
+`ci.yml`: `lint` always runs: the format check, Gazelle staleness, that the
+release targets exist, the registry setting, and `bazel/proto/breaking.sh`
+(it needs the base's history, so it is not a Bazel test). buf lint is an
+ordinary test, run by `build` when its proto is impacted. `diff` computes, with bazel-diff, the
+targets a change impacts (`bazel/ci-impacted-targets.sh`), so a
+documentation-only change builds nothing; anything it cannot decide is a full
+run. `build` builds and tests only the impacted targets (the SPIRE
+integration and end-to-end tests included). `ci` is the single required
+check. The bazel-diff seed files in the script (`.bazelrc`, `MODULE.bazel`,
+the lint `.bzl` files, `VERSION`, ...) are the CI inputs that no target
+depends on: add a new one there. Actions are pinned to commit SHAs with the
+version in a comment.
 
 ## Pull requests
 
 One topic per pull request, squash-merged. Run `bazel run //:gazelle`,
-`bazel run //:format` and `bazel build --config=ci //... && bazel test //...`
-before pushing.
+`bazel run //:format` and `bazel build --config=ci //... && bazel test
+--config=ci //...` before pushing.

@@ -6,7 +6,7 @@ build --incompatible_strict_action_env
 build --workspace_status_command=bazel/workspace_status.sh
 
 # Stamp by default, so that a binary built anywhere says which commit or
-# release it is: the binaries' version (//common/version) and the image
+# release it is: the binaries' version (//internal/version) and the image
 # push's tags come from the workspace status. Every binary links again on
 # each commit; nothing else rebuilds.
 build --stamp

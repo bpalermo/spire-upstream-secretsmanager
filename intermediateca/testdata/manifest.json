@@ -1,0 +1,143 @@
+{
+  "comment": "Decode each file at decode_at. A valid file decodes, and its root certificate's DER hashes to root_sha256. An invalid file is refused for the category in error: invalid (schema, JSON or PEM/PKCS#8 parsing), key_mismatch, not_ca, chain, or expired.",
+  "decode_at": "2026-06-01T00:00:00Z",
+  "valid": [
+    {
+      "file": "valid/direct.json",
+      "root_sha256": "ed032855723f6926050bf76ef340dc11dc5a5d840ab8f22331c7512aad6b6f06"
+    },
+    {
+      "file": "valid/chain.json",
+      "root_sha256": "ed032855723f6926050bf76ef340dc11dc5a5d840ab8f22331c7512aad6b6f06"
+    },
+    {
+      "file": "valid/chain-root-first.json",
+      "root_sha256": "ed032855723f6926050bf76ef340dc11dc5a5d840ab8f22331c7512aad6b6f06"
+    },
+    {
+      "file": "valid/no-key-usage.json",
+      "root_sha256": "ed032855723f6926050bf76ef340dc11dc5a5d840ab8f22331c7512aad6b6f06"
+    },
+    {
+      "file": "valid/unknown-fields.json",
+      "root_sha256": "ed032855723f6926050bf76ef340dc11dc5a5d840ab8f22331c7512aad6b6f06"
+    }
+  ],
+  "invalid": [
+    {
+      "file": "invalid/not-json.json",
+      "error": "invalid",
+      "reason": "not a JSON document"
+    },
+    {
+      "file": "invalid/unknown-format.json",
+      "error": "invalid",
+      "reason": "unknown format"
+    },
+    {
+      "file": "invalid/missing-format.json",
+      "error": "invalid",
+      "reason": "no format"
+    },
+    {
+      "file": "invalid/missing-cert.json",
+      "error": "invalid",
+      "reason": "no cert"
+    },
+    {
+      "file": "invalid/missing-key.json",
+      "error": "invalid",
+      "reason": "no key"
+    },
+    {
+      "file": "invalid/missing-root.json",
+      "error": "invalid",
+      "reason": "no root"
+    },
+    {
+      "file": "invalid/cert-bad-prefix.json",
+      "error": "invalid",
+      "reason": "cert does not start with a PEM certificate"
+    },
+    {
+      "file": "invalid/root-bad-prefix.json",
+      "error": "invalid",
+      "reason": "root does not start with a PEM certificate"
+    },
+    {
+      "file": "invalid/key-bad-prefix.json",
+      "error": "invalid",
+      "reason": "key is a SEC1 EC PRIVATE KEY, not PKCS#8"
+    },
+    {
+      "file": "invalid/key-not-pkcs8.json",
+      "error": "invalid",
+      "reason": "key is labeled PRIVATE KEY but holds a SEC1 structure, not PKCS#8"
+    },
+    {
+      "file": "invalid/chain-bad-prefix.json",
+      "error": "invalid",
+      "reason": "chain is neither empty nor a PEM certificate"
+    },
+    {
+      "file": "invalid/cert-too-large.json",
+      "error": "invalid",
+      "reason": "cert is over 16 KiB"
+    },
+    {
+      "file": "invalid/chain-too-large.json",
+      "error": "invalid",
+      "reason": "chain is over 64 KiB"
+    },
+    {
+      "file": "invalid/two-certs-in-cert.json",
+      "error": "invalid",
+      "reason": "cert holds two certificates"
+    },
+    {
+      "file": "invalid/two-certs-in-root.json",
+      "error": "invalid",
+      "reason": "root holds two certificates"
+    },
+    {
+      "file": "invalid/trailing-text-in-cert.json",
+      "error": "invalid",
+      "reason": "text after the certificate in cert"
+    },
+    {
+      "file": "invalid/key-mismatch.json",
+      "error": "key_mismatch",
+      "reason": "key is not cert's private key"
+    },
+    {
+      "file": "invalid/not-ca.json",
+      "error": "not_ca",
+      "reason": "cert has no CA:TRUE basic constraint"
+    },
+    {
+      "file": "invalid/no-cert-sign.json",
+      "error": "not_ca",
+      "reason": "cert has a key usage without certSign"
+    },
+    {
+      "file": "invalid/chain-missing.json",
+      "error": "chain",
+      "reason": "cert is issued by an intermediate that is not in chain"
+    },
+    {
+      "file": "invalid/wrong-root.json",
+      "error": "chain",
+      "reason": "cert does not verify to root"
+    },
+    {
+      "file": "invalid/expired.json",
+      "error": "expired",
+      "reason": "cert expired before the decode time"
+    },
+    {
+      "file": "invalid/not-yet-valid.json",
+      "error": "expired",
+      "reason": "cert is not valid until after the decode time"
+    }
+  ]
+}

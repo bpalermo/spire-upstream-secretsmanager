@@ -1,0 +1,10 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "spiretest",
+    testonly = True,
+    srcs = ["spiretest.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/internal/spiretest",
+    visibility = ["//:__subpackages__"],
+    deps = ["@rules_go//go/runfiles"],
+)

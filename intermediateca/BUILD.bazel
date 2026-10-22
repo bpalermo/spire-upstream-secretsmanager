@@ -1,0 +1,23 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "intermediateca",
+    srcs = ["intermediateca.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/intermediateca",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//intermediateca/v1:intermediateca",
+        "@build_buf_go_protovalidate//:protovalidate",
+        "@org_golang_google_protobuf//encoding/protojson",
+    ],
+)
+
+go_test(
+    name = "intermediateca_test",
+    srcs = ["intermediateca_test.go"],
+    data = glob(["testdata/**"]),
+    deps = [
+        ":intermediateca",
+        "//internal/fixedpki",
+    ],
+)

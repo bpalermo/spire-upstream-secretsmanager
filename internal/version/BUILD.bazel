@@ -3,8 +3,8 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "version",
     srcs = ["version.go"],
-    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/common/version",
-    visibility = ["//visibility:public"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/internal/version",
+    visibility = ["//:__subpackages__"],
     # Every binary linking this package gets the version of the commit it is
     # built from. Stamping is on by default (.bazelrc), so a binary links
     # again on every commit; nothing else rebuilds.

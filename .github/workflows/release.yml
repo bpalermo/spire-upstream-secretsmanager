@@ -1,17 +1,19 @@
 name: release
 
 # A tag v<VERSION> or v<VERSION>-rc.<n> on a commit of main publishes that
-# release: the plugin binaries, their checksums, an SBOM, the multi-arch image,
-# the cosign keyless signatures, and the GitHub Release that lists them. Who may
-# create such a tag, and that it can never be moved or deleted, is the
-# repository's tag rulesets'.
+# release of everything in the repository, under the one version: the plugin
+# binaries, the plugin's multi-arch image, the rotator Lambda's zip archives,
+# checksums.txt over the binaries and the archives, an SBOM, the cosign keyless
+# signatures, and the GitHub Release that lists them. The secret format
+# (//intermediateca) is a Go package of this module and is released as its
+# tag. Who may create such a tag, and that it can never be moved or deleted,
+# is the repository's tag rulesets'.
 on:
   push:
     tags: ["v*"]
 
-# The least each job needs; `publish` adds the OIDC token it signs with and
-# the right to write the image's package, `release` the write that creates the
-# GitHub Release.
+# The least each job needs; `publish` adds the OIDC token it signs with,
+# `release` the write that creates the GitHub Release.
 permissions:
   contents: read
 
@@ -21,23 +23,37 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Keep equal to the platforms of //:upstream-secretsmanager (the
-  # upstream-secretsmanager_<platform> targets) and the query in ci.yml.
+  # Keep equal to the platforms of //upstream-secretsmanager (the
+  # upstream-secretsmanager_<platform> targets) and of //rotator (the
+  # zip_<platform> targets), and to the query in ci.yml.
   RELEASE_PLATFORMS: linux_amd64 linux_arm64
 
-# Third-party actions are pinned to commit SHAs, not tags. This job holds
-# `packages: write` and `id-token: write`, so an action that a retagged or
+# WHERE the image goes is one setting, bazel/registry.bzl. Bazel loads it; the
+# job reads it through bazel/registry.sh into its environment
+# (SPIRE_UPSTREAM_SECRETSMANAGER_IMAGE, IMAGE_REGISTRY_HOST, ...), and
+# bazel/check-registry-config.sh fails CI on a registry spelled out here.
+#
+# Credentials are a Quay robot account, secrets QUAY_USERNAME / QUAY_TOKEN of
+# the `release` environment, which only main and v* tags can use. The robot can
+# write the repository and cannot create it: it must exist already.
+#
+# Third-party actions are pinned to commit SHAs, not tags. This job holds the
+# registry credential and `id-token: write`, so an action that a retagged or
 # compromised release swapped underneath us could push and sign an image with
-# this repository's own identity. The version each SHA corresponds to is in
-# the comment beside it.
+# this repository's own identity. A tag is mutable; a commit SHA is not. The
+# version each SHA corresponds to is in the comment beside it.
 jobs:
   publish:
     name: publish
+    # Only a v* tag triggers this workflow today; the guard keeps it that way
+    # if a trigger is ever added (workflow_dispatch can target any branch, and
+    # a run from a feature branch would sign with an identity close to a
+    # release's).
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    environment: release
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      # Pushes the image to ghcr.io/<owner>/<repository>.
-      packages: write
       # Exchanged with Fulcio for a short-lived signing certificate. Keyless:
       # there is no private key to store or rotate.
       id-token: write
@@ -86,7 +102,7 @@ jobs:
       # instead of `dev`. The flag goes into user.bazelrc under --config=ci, so
       # that every build, run and cquery below sees one configuration.
       - name: Tag the image with the release
-        run: echo "common:ci --//:image_tag=${GITHUB_REF_NAME}" >> user.bazelrc
+        run: echo "common:ci --//upstream-secretsmanager:image_tag=${GITHUB_REF_NAME}" >> user.bazelrc
 
       # No version is pinned here: bazelisk reads .bazelversion.
       - uses: bazel-contrib/setup-bazel@104e3eea9447cdaa4b00d0fb46191a3985d26ab3 # 0.19.1
@@ -95,6 +111,9 @@ jobs:
           disk-cache: ${{ github.workflow }}
           repository-cache: true
           cache-save: false
+
+      - name: Read the registry setting
+        run: bazel/registry.sh >> "${GITHUB_ENV}"
 
       # Everything is built before any credential exists on the runner: Bazel
       # executes build tooling from the dependency graph, and a registry
@@ -106,24 +125,26 @@ jobs:
       #
       # Keep this list equal to the query in ci.yml, which fails a pull request
       # that renames or removes one of these.
-      - name: Build the binaries, the image and cosign
+      - name: Build the binaries, the archives, the image and cosign
         run: |
           set -euo pipefail
           targets=()
           for platform in ${RELEASE_PLATFORMS}; do
-            targets+=("//:upstream-secretsmanager_${platform}")
+            targets+=("//upstream-secretsmanager:upstream-secretsmanager_${platform}" "//rotator:zip_${platform}")
           done
           bazel build --config=ci --output_groups=+digest "${targets[@]}" \
-            //:image_push //:image_index \
-            //bazel/cosign
+            //upstream-secretsmanager:image_push //upstream-secretsmanager:image_index \
+            //bazel/cosign //bazel/cosign:verify_image
 
-      # Named upstream-secretsmanager_<version>_<os>_<arch>, the version
-      # without its v, beside checksums.txt in sha256sum's format. SPIRE's
-      # plugin_checksum is the SHA-256 of the binary, so each line of
-      # checksums.txt is the value for that architecture. All come from one
-      # stamped build, so they carry one version; the linux/amd64 one, which
-      # this runner can run, must report the tag, or nothing is signed.
-      - name: Collect the binaries and their checksums
+      # The plugin binaries are named upstream-secretsmanager_<version>_<os>_<arch>
+      # and the Lambda archives kms-intermediate-rotator_<version>_linux_<arch>.zip,
+      # the version without its v, beside checksums.txt in sha256sum's format.
+      # SPIRE's plugin_checksum is the SHA-256 of the binary, so each plugin
+      # line of checksums.txt is the value for that architecture. All come
+      # from one stamped build, so they carry one version; the linux/amd64
+      # plugin and Lambda, which this runner can run, must report the tag, or
+      # nothing is signed.
+      - name: Collect the binaries, the archives and their checksums
         run: |
           set -euo pipefail
           status="$(bazel/workspace_status.sh)"
@@ -135,21 +156,36 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           rm -rf dist
           mkdir dist
-          for platform in ${RELEASE_PLATFORMS}; do
-            built="$(bazel cquery --config=ci "//:upstream-secretsmanager_${platform}" --output=files 2>/dev/null | head -1)"
-            if [ -z "${built}" ] || [ ! -s "${built}" ]; then
-              echo "::error::could not find the binary of ${platform} (${built})" >&2
+          # built <label>: the file the label built, or fail.
+          built() {
+            local f
+            f="$(bazel cquery --config=ci "$1" --output=files 2>/dev/null | head -1)"
+            if [ -z "${f}" ] || [ ! -s "${f}" ]; then
+              echo "::error::could not find what $1 built (${f})" >&2
               exit 1
             fi
-            install -m 0755 "${built}" "dist/upstream-secretsmanager_${version}_${platform}"
+            echo "${f}"
+          }
+          for platform in ${RELEASE_PLATFORMS}; do
+            install -m 0755 "$(built "//upstream-secretsmanager:upstream-secretsmanager_${platform}")" \
+              "dist/upstream-secretsmanager_${version}_${platform}"
+            install -m 0644 "$(built "//rotator:zip_${platform}")" \
+              "dist/kms-intermediate-rotator_${version}_${platform}.zip"
           done
           got="$("dist/upstream-secretsmanager_${version}_linux_amd64" --version)"
           if [ "${got}" != "upstream-secretsmanager ${GITHUB_REF_NAME}" ]; then
-            echo "::error::the binary reports '${got}', want 'upstream-secretsmanager ${GITHUB_REF_NAME}'" >&2
+            echo "::error::the plugin reports '${got}', want 'upstream-secretsmanager ${GITHUB_REF_NAME}'" >&2
             exit 1
           fi
-          cp "${RUNNER_TEMP}/sbom.spdx.json" "dist/upstream-secretsmanager_${version}_sbom.spdx.json"
-          (cd dist && sha256sum upstream-secretsmanager_*_linux_* >checksums.txt)
+          probe="$(mktemp -d)"
+          unzip -q "dist/kms-intermediate-rotator_${version}_linux_amd64.zip" -d "${probe}"
+          got="$("${probe}/bootstrap" --version)"
+          if [ "${got}" != "kms-intermediate-rotator ${GITHUB_REF_NAME}" ]; then
+            echo "::error::the Lambda's bootstrap reports '${got}', want 'kms-intermediate-rotator ${GITHUB_REF_NAME}'" >&2
+            exit 1
+          fi
+          cp "${RUNNER_TEMP}/sbom.spdx.json" "dist/spire-upstream-secretsmanager_${version}_sbom.spdx.json"
+          (cd dist && sha256sum upstream-secretsmanager_*_linux_* kms-intermediate-rotator_*_linux_*.zip >checksums.txt)
           cat dist/checksums.txt
 
       # cosign 3 writes the signature, its certificate and the transparency
@@ -161,7 +197,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          for f in checksums.txt "upstream-secretsmanager_${version}_sbom.spdx.json"; do
+          for f in checksums.txt "spire-upstream-secretsmanager_${version}_sbom.spdx.json"; do
             bazel run --config=ci //bazel/cosign -- sign-blob --bundle "dist/${f}.sigstore.json" "dist/${f}"
           done
 
@@ -169,7 +205,7 @@ jobs:
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
-          for f in checksums.txt "upstream-secretsmanager_${version}_sbom.spdx.json"; do
+          for f in checksums.txt "spire-upstream-secretsmanager_${version}_sbom.spdx.json"; do
             bazel run --config=ci //bazel/cosign -- verify-blob "dist/${f}" \
               --bundle "dist/${f}.sigstore.json" \
               --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
@@ -177,26 +213,28 @@ jobs:
           done
           (cd dist && sha256sum -c checksums.txt)
 
+      # One login covers everything below: image_push (rules_img) and cosign
+      # read the Docker config this writes.
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ github.token }}
+          registry: ${{ env.IMAGE_REGISTRY_HOST }}
+          username: ${{ secrets.QUAY_USERNAME }}
+          password: ${{ secrets.QUAY_TOKEN }}
 
       - name: Push the multi-arch image
-        run: bazel run --config=ci //:image_push
+        run: bazel run --config=ci //upstream-secretsmanager:image_push
 
       # The digest comes from the build rather than from the registry: Bazel
       # already wrote the digest and the coordinates it pushed (image_push.json
-      # sits beside the index, in the same package of bazel-bin).
+      # sits beside the index, in upstream-secretsmanager/ of bazel-bin).
       - name: Record the pushed digest
         id: digest
         run: |
           set -euo pipefail
-          push="$(bazel info --config=ci bazel-bin 2>/dev/null)/image_push.json"
+          push="$(bazel info --config=ci bazel-bin 2>/dev/null)/upstream-secretsmanager/image_push.json"
           ref="$(jq -er '.operations[0] | .registry + "/" + .repository + "@" + .root.digest' "${push}")"
-          if ! [[ "${ref}" =~ ^[a-z0-9./_-]+@sha256:[0-9a-f]{64}$ ]]; then
-            echo "::error::unexpected image reference ${ref}" >&2
+          if ! [[ "${ref}" =~ ^${SPIRE_UPSTREAM_SECRETSMANAGER_IMAGE}@sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::pushed ${ref}, which is not ${SPIRE_UPSTREAM_SECRETSMANAGER_IMAGE}@sha256:<digest>" >&2
             exit 1
           fi
           echo "image=${ref}" >> "${GITHUB_OUTPUT}"
@@ -206,21 +244,61 @@ jobs:
       # anyone pulling the amd64 or arm64 manifest by its own digest gets
       # something unsigned. Signing by digest rather than by tag avoids cosign
       # re-resolving a mutable tag to something other than what was pushed.
+      #
+      # The registry serves the OCI 1.1 Referrers API, so cosign 3 attaches
+      # each signature as a referrer of the manifest it signs and writes no
+      # tag. `bazel run` passes the environment through, so the OIDC request
+      # variables `id-token: write` provides reach cosign unchanged.
+      #
+      # An image keeps its digest for as long as its content does, so this
+      # release may have pushed exactly what an earlier one signed. Signing it
+      # again would add one more signature to the same manifests, for
+      # nothing: ask the verifier first, and sign unless it accepts the index
+      # and every child. It exits 1 for "not signed, or not all of it" and 2
+      # for "could not check"; only the first is a reason to sign. The step
+      # after this one verifies again, and that one counts.
       - name: Sign the image
         env:
           COSIGN_YES: "true"
           IMAGE: ${{ steps.digest.outputs.image }}
-        run: bazel run --config=ci //bazel/cosign -- sign --recursive "${IMAGE}"
+          REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
+          REGISTRY_CREDENTIAL_HOST: ${{ env.IMAGE_REGISTRY_HOST }}
+        run: |
+          set -euo pipefail
+          rc=0
+          bazel run --config=ci //bazel/cosign:verify_image -- "${IMAGE}" >presign.log 2>&1 || rc=$?
+          case "${rc}" in
+            0)
+              echo "${IMAGE} is already signed by this workflow: an earlier release published the same image"
+              exit 0
+              ;;
+            1) ;;
+            *)
+              cat presign.log
+              echo "::error::could not check whether ${IMAGE} is already signed (exit ${rc})" >&2
+              exit 1
+              ;;
+          esac
+          bazel run --config=ci //bazel/cosign -- sign --recursive "${IMAGE}"
 
-      # With no credential of ours: the image is public, and this is the check
-      # a consumer can run.
-      - name: Verify the image signature
+      # Every digest that was signed, not just the index: `cosign verify` has
+      # no --recursive to match `cosign sign --recursive`, so the verifier
+      # walks the index's children itself, as the registry lists them.
+      #
+      # It then asks the registry where each signature landed, rather than
+      # asking the binary that just wrote it whether it likes what it wrote --
+      # `cosign verify` accepts every layout cosign has written. The setting
+      # promises SIGNATURE_LAYOUT (`referrer`): a referrer and no
+      # `sha256-<digest>` tag, for the index and every child. A signature in
+      # two places fails.
+      - name: Verify the signatures and where they are published
         env:
           IMAGE: ${{ steps.digest.outputs.image }}
-        run: |
-          bazel run --config=ci //bazel/cosign -- verify "${IMAGE}" \
-            --certificate-identity "https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          REGISTRY_USERNAME: ${{ secrets.QUAY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.QUAY_TOKEN }}
+          REGISTRY_CREDENTIAL_HOST: ${{ env.IMAGE_REGISTRY_HOST }}
+        run: bazel run --config=ci //bazel/cosign:verify_image -- "${IMAGE}"
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -230,8 +308,9 @@ jobs:
           retention-days: 7
 
   # The GitHub Release of the tag: what was published, by digest, the checksum
-  # of each architecture's binary for SPIRE's plugin_checksum, and how to
-  # verify it, then the changes since the last release. A job of its own, so
+  # of each architecture's plugin binary for SPIRE's plugin_checksum, the
+  # SHA-256 of each Lambda archive, and how to verify them, then the changes
+  # since the last release. A job of its own, so
   # that the publishing job, which can write the package and sign, never also
   # holds a token that can write to the repository.
   release:
@@ -259,7 +338,8 @@ jobs:
           version="${GITHUB_REF_NAME#v}"
           want="$(printf '%s\n' checksums.txt checksums.txt.sigstore.json \
             "upstream-secretsmanager_${version}_linux_amd64" "upstream-secretsmanager_${version}_linux_arm64" \
-            "upstream-secretsmanager_${version}_sbom.spdx.json" "upstream-secretsmanager_${version}_sbom.spdx.json.sigstore.json" | sort)"
+            "kms-intermediate-rotator_${version}_linux_amd64.zip" "kms-intermediate-rotator_${version}_linux_arm64.zip" \
+            "spire-upstream-secretsmanager_${version}_sbom.spdx.json" "spire-upstream-secretsmanager_${version}_sbom.spdx.json.sigstore.json" | sort)"
           got="$(find dist -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)"
           if [ "${got}" != "${want}" ]; then
             echo "::error::the release artifact holds:" >&2
@@ -290,12 +370,17 @@ jobs:
           fi
           changes="$(gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" "${args[@]}" --jq .body)"
           identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
-          amd64="$(awk -v f="upstream-secretsmanager_${version}_linux_amd64" '$2 == f {print $1}' dist/checksums.txt)"
-          arm64="$(awk -v f="upstream-secretsmanager_${version}_linux_arm64" '$2 == f {print $1}' dist/checksums.txt)"
-          if [ -z "${amd64}" ] || [ -z "${arm64}" ]; then
-            echo "::error::checksums.txt has no checksum for one of the architectures" >&2
-            exit 1
-          fi
+          # sum <file>: its SHA-256 from checksums.txt, or fail.
+          sum() {
+            local v
+            v="$(awk -v f="$1" '$2 == f {print $1}' dist/checksums.txt)"
+            [ -n "${v}" ] || { echo "::error::checksums.txt has no checksum for $1" >&2; exit 1; }
+            echo "${v}"
+          }
+          amd64="$(sum "upstream-secretsmanager_${version}_linux_amd64")"
+          arm64="$(sum "upstream-secretsmanager_${version}_linux_arm64")"
+          zip_amd64="$(sum "kms-intermediate-rotator_${version}_linux_amd64.zip")"
+          zip_arm64="$(sum "kms-intermediate-rotator_${version}_linux_arm64.zip")"
           cat >notes.md <<NOTES
           ## Plugin checksums
 
@@ -310,7 +395,7 @@ jobs:
           The binaries are statically linked and stamped with \`${tag}\`
           (\`--version\`).
 
-          ## Image
+          ## Plugin image
 
           \`${IMAGE}\`
 
@@ -320,10 +405,29 @@ jobs:
           as a Kubernetes image volume and executed from there. Also tagged
           \`${tag}\`.
 
+          ## Rotator Lambda
+
+          For the \`provided.al2023\` custom runtime. Pick the archive of the
+          function's architecture; it holds one statically linked executable,
+          \`bootstrap\`. Lambda's \`source_code_hash\` is the base64 of the
+          same digest.
+
+          | Architecture | Archive | SHA-256 |
+          |---|---|---|
+          | arm64 | \`kms-intermediate-rotator_${version}_linux_arm64.zip\` | \`${zip_arm64}\` |
+          | x86_64 | \`kms-intermediate-rotator_${version}_linux_amd64.zip\` | \`${zip_amd64}\` |
+
+          ## Secret format
+
+          \`intermediate-ca/v1\`, unchanged in meaning across releases
+          (docs/secret-format.md). Go package
+          \`github.com/bpalermo/spire-upstream-secretsmanager/intermediateca@${tag}\`.
+
           ## Verify
 
-          The image, its platform manifests, \`checksums.txt\` and the SBOM are
-          signed by this release's workflow run:
+          The image, its platform manifests, \`checksums.txt\` (which lists the
+          plugin binaries and the Lambda archives) and the SBOM are signed by
+          this release's workflow run:
 
           \`\`\`bash
           cosign verify ${IMAGE} \\

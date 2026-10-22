@@ -1,0 +1,21 @@
+# What buf checks in the protos. buf does not compile or generate anything
+# here: Bazel does. The *_proto_lint_test targets run the lint rules and
+# bazel/proto/breaking.sh the breaking ones.
+version: v2
+lint:
+  use:
+    - STANDARD
+    # Every message and field carries a comment: the comments are the
+    # reference documentation of the secret format and of the
+    # configurations.
+    - COMMENTS
+breaking:
+  use:
+    # The secret format is a contract between writers and readers released
+    # separately that read each other's data for years, as binary or as JSON;
+    # the rotator's configuration is read as JSON by Lambdas deployed
+    # separately from whoever writes it. Nothing renumbered, retyped, renamed
+    # or deleted, in the binary or in the JSON mapping. A change to the secret
+    # format that needs one of those is a new format version
+    # (intermediateca/v2), not an edit.
+    - WIRE_JSON

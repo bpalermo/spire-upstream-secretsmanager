@@ -1,0 +1,9 @@
+load("@rules_shell//shell:sh_library.bzl", "sh_library")
+
+# breaking.sh (buf breaking of every proto against a base commit, the `lint`
+# job of ci.yml) is run by people and workflows; this is how the shellcheck
+# aspect (--config=lint) sees it.
+sh_library(
+    name = "scripts",
+    srcs = glob(["*.sh"]),
+)

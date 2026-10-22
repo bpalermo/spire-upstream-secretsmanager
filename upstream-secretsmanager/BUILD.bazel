@@ -1,0 +1,82 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_cross_binary", "go_library", "go_test")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+load("//bazel:registry.bzl", "IMAGE_REGISTRY", "image_repository")
+load("//bazel/image:defs.bzl", "go_image")
+
+go_library(
+    name = "upstream-secretsmanager_lib",
+    srcs = ["main.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/upstream-secretsmanager",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//internal/version",
+        "//plugin",
+        "@com_github_spiffe_spire_plugin_sdk//pluginmain",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/plugin/server/upstreamauthority/v1:upstreamauthority",
+        "@com_github_spiffe_spire_plugin_sdk//proto/spire/service/common/config/v1:config",
+    ],
+)
+
+# The SPIRE UpstreamAuthority plugin.
+go_binary(
+    name = "upstream-secretsmanager",
+    basename = "upstream-secretsmanager",
+    embed = [":upstream-secretsmanager_lib"],
+    # Statically linked: SPIRE execs it from an image volume that has no libc.
+    pure = "on",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "upstream-secretsmanager_test",
+    srcs = ["main_test.go"],
+    embed = [":upstream-secretsmanager_lib"],
+)
+
+# The image holds the binary and nothing else, at /upstream-secretsmanager
+# with mode 0755: no base image. SPIRE server pods mount it as a Kubernetes
+# image volume and exec the file from there.
+go_image(
+    name = "image",
+    binary = ":upstream-secretsmanager",
+    load_tag = "localhost/spire-upstream-secretsmanager:dev",
+    path = "/upstream-secretsmanager",
+    registry = IMAGE_REGISTRY,
+    repository = image_repository("spire-upstream-secretsmanager"),
+)
+
+# The release binaries (release.yml attaches them to the GitHub Release of a
+# v* tag as upstream-secretsmanager_<version>_<os>_<arch>). Each is
+# :upstream-secretsmanager built for one platform: pure Go, so statically
+# linked, and stamped like every binary (//internal/version), so a release
+# build reports its tag. Keep the list equal to RELEASE_PLATFORMS of
+# release.yml.
+[
+    go_cross_binary(
+        name = "upstream-secretsmanager_" + platform,
+        platform = "//bazel/platforms:" + platform,
+        target = ":upstream-secretsmanager",
+        visibility = ["//visibility:public"],
+    )
+    for platform in [
+        "linux_amd64",
+        "linux_arm64",
+    ]
+]
+
+# Each release binary is an executable of its own CPU and static (no program
+# interpreter): SPIRE execs it from an image volume that has no libc.
+sh_test(
+    name = "release_binaries_test",
+    size = "small",
+    srcs = ["release_binaries_test.sh"],
+    args = [
+        "linux_amd64=$(rlocationpath :upstream-secretsmanager_linux_amd64)",
+        "linux_arm64=$(rlocationpath :upstream-secretsmanager_linux_arm64)",
+    ],
+    data = [
+        ":upstream-secretsmanager_linux_amd64",
+        ":upstream-secretsmanager_linux_arm64",
+    ],
+    deps = ["@bazel_tools//tools/bash/runfiles"],
+)

@@ -8,25 +8,26 @@ go_test(
     srcs = ["spireserver_test.go"],
     args = [
         "--spire_server=$(rlocationpath :spire_server)",
-        "--plugin=$(rlocationpath //:upstream-secretsmanager)",
+        "--plugin=$(rlocationpath //upstream-secretsmanager)",
     ],
     data = [
         ":spire_server",
-        "//:upstream-secretsmanager",
+        "//upstream-secretsmanager",
     ],
     target_compatible_with = ["@platforms//os:linux"],
     deps = [
         "//internal/fakesm",
+        "//internal/spiretest",
         "//internal/testpki",
-        "@rules_go//go/runfiles",
     ],
 )
 
-# The spire-server binary of the host's CPU.
+# The spire-server binary of the host's CPU; //integration/e2e runs it too.
 alias(
     name = "spire_server",
     actual = select({
         "@platforms//cpu:aarch64": "@spire_linux_arm64//:bin/spire-server",
         "@platforms//cpu:x86_64": "@spire_linux_amd64//:bin/spire-server",
     }),
+    visibility = ["//integration:__subpackages__"],
 )

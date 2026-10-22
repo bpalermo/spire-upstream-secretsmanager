@@ -1,0 +1,8 @@
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+
+# Runs every verifier test, the manual ones included, and prints the verdicts
+# (see RESULTS.md). A target so that shellcheck lints it.
+sh_binary(
+    name = "run",
+    srcs = ["run.sh"],
+)

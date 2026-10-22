@@ -1,0 +1,14 @@
+load("@rules_go//go:def.bzl", "go_test")
+load("//verifiers:defs.bzl", "DOCKER_TEST_TAGS")
+
+go_test(
+    name = "kafka_test",
+    size = "large",
+    srcs = ["kafka_test.go"],
+    args = ["-test.v"],
+    tags = DOCKER_TEST_TAGS,
+    deps = [
+        "//verifiers/chains",
+        "//verifiers/internal/docker",
+    ],
+)

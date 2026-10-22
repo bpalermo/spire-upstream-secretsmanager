@@ -56,6 +56,11 @@ the public proxy; a `Duplicate rc file: user.bazelrc` warning is harmless.
 - `integration/spireserver/`: runs the SPIRE server release pinned in
   MODULE.bazel (`@spire_linux_<arch>`, checksummed) with the plugin against
   the fake Secrets Manager. No network beyond loopback.
+- `verifiers/`: whether real verifiers (Go crypto/x509, Envoy, MySQL, Kafka)
+  enforce X.509 name constraints on the intermediate, and whether a kind
+  cluster's containerd can exec the plugin from an image volume. Only the Go
+  test runs in CI; the others are `manual` and need Docker
+  (`verifiers/run.sh`). Findings in `verifiers/RESULTS.md`.
 - `common/version/`: the version, stamped at link time from the workspace
   status.
 - `bazel/`: `workspace_status.sh` (stamping from `VERSION` and git tags),

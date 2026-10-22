@@ -1,0 +1,27 @@
+load("@rules_go//go:def.bzl", "go_test")
+load("//verifiers:defs.bzl", "DOCKER_TEST_TAGS")
+
+# The plugin image as rules_img's OCI layout tarball: the multi-platform
+# index with every blob, as built.
+filegroup(
+    name = "plugin_oci_tarball",
+    srcs = ["//:image_index"],
+    output_group = "oci_tarball",
+)
+
+go_test(
+    name = "imagevolume_test",
+    size = "large",
+    srcs = ["imagevolume_test.go"],
+    args = [
+        "-test.v",
+        "--oci_tarball=$(rlocationpath :plugin_oci_tarball)",
+    ],
+    data = [":plugin_oci_tarball"],
+    tags = DOCKER_TEST_TAGS,
+    target_compatible_with = ["@platforms//os:linux"],
+    deps = [
+        "//verifiers/internal/docker",
+        "@rules_go//go/runfiles",
+    ],
+)

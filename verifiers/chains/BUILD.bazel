@@ -1,0 +1,10 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "chains",
+    testonly = True,
+    srcs = ["chains.go"],
+    importpath = "github.com/bpalermo/spire-upstream-secretsmanager/verifiers/chains",
+    visibility = ["//verifiers:__subpackages__"],
+    deps = ["//internal/testpki"],
+)

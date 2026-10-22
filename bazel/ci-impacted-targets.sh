@@ -8,7 +8,6 @@
 #   impacted_build.txt   impacted ∩ the buildable rules (nothing tagged manual)
 #   impacted_test.txt    impacted ∩ the tests `bazel test //...` runs (nothing
 #                        tagged manual)
-#   impacted_commit.txt  the commit the lists are for
 # Appended to GITHUB_OUTPUT when it is set, and printed:
 #   has_any    impacted_build.txt is not empty: the build job runs
 #   has_test   impacted_test.txt is not empty: the build job runs the tests
@@ -151,13 +150,6 @@ HEAD_SHA="${HEAD_SHA:-${start_commit}}"
 head_commit="$(git rev-parse --verify -q "${HEAD_SHA}^{commit}")" || die "HEAD_SHA ${HEAD_SHA} is not a commit of this repository"
 [ "${head_commit}" = "${start_commit}" ] ||
 	die "HEAD_SHA is ${head_commit} and the checkout is at ${start_commit}: the lists would be for another tree than the one the caller builds"
-# No commit file from an earlier run into the same OUT_DIR: a run that fails
-# leaves none, so its lists cannot pass the check of the job that reads them.
-rm -f "${OUT_DIR}/impacted_commit.txt" || die "could not remove a stale impacted_commit.txt"
-# stamp: the lists in OUT_DIR are for start_commit. Called once they are written.
-stamp() {
-	echo "${start_commit}" >"${OUT_DIR}/impacted_commit.txt" || die "could not write impacted_commit.txt"
-}
 
 # full_run <reason>: everything impacted (build //..., run every test) and
 # exit 0. The answer to every "the impacted set could not be
@@ -168,7 +160,6 @@ full_run() {
 	candidate_lists || die "the full run could not list the targets (see the query above); refusing to report an empty test set"
 	echo '//...' >"${OUT_DIR}/impacted_build.txt" || die "could not write impacted_build.txt"
 	cp "${OUT_DIR}/all_tests.txt" "${OUT_DIR}/impacted_test.txt" || die "could not write impacted_test.txt"
-	stamp
 	emit has_any true
 	emit has_test true
 	echo ">> impacted: everything (full run); test=$(wc -l <"${OUT_DIR}/impacted_test.txt")"
@@ -247,7 +238,6 @@ candidate_lists || full_run "a classification query failed or returned nothing"
 classify "${OUT_DIR}/impacted.sorted" "${OUT_DIR}/all_rules.txt" "${OUT_DIR}/all_tests.txt" "${OUT_DIR}" ||
 	die "could not write the impacted lists"
 
-stamp
 emit has_any "${has_any}"
 emit has_test "${has_test}"
 

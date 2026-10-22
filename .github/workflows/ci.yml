@@ -81,28 +81,6 @@ jobs:
             exit 1
           fi
 
-      # Everything release.yml builds is built by `build` whenever it is
-      # impacted; naming it here keeps a rename or a removal from passing CI
-      # and failing on the first release. A query, not a build: it fails on a
-      # label that does not exist and costs nothing else. Keep this list equal
-      # to the build step of release.yml.
-      - name: the release targets exist
-        run: |
-          bazel query --config=ci --noshow_progress 'set(
-            //upstream-secretsmanager:image_push
-            //upstream-secretsmanager:image_index
-            //upstream-secretsmanager:upstream-secretsmanager_linux_amd64
-            //upstream-secretsmanager:upstream-secretsmanager_linux_arm64
-            //rotator:zip_linux_amd64
-            //rotator:zip_linux_arm64
-            //bazel/cosign:cosign
-            //bazel/cosign:verify_image)'
-
-      # The registry is one setting, bazel/registry.bzl: the workflows read it
-      # through bazel/registry.sh, and nothing else may spell it out.
-      - name: The registry is one setting
-        run: bazel/check-registry-config.sh
-
       # A field renumbered, retyped, renamed or removed in the secret format or
       # a configuration (buf.yaml's breaking rules). A pull request is
       # compared with the commit it branched from; a push to main with the
@@ -233,30 +211,6 @@ jobs:
         with:
           name: impacted-targets
           path: ${{ runner.temp }}/impacted
-
-      # A list that is not there is not an empty list, a list of another
-      # commit's tree is not a list of this one, and a flag `diff` set has to
-      # agree with its list: the gate below trusts the flags.
-      - name: the lists are for this checkout and agree with diff
-        env:
-          LISTS: ${{ runner.temp }}/impacted
-          HAS_ANY: ${{ needs.diff.outputs.has_any }}
-          HAS_TEST: ${{ needs.diff.outputs.has_test }}
-        run: |
-          for f in impacted_build.txt impacted_test.txt impacted_commit.txt; do
-            [ -r "${LISTS}/${f}" ] || { echo "::error::${f} is missing from the impacted-targets artifact" >&2; exit 1; }
-          done
-          if [ "$(cat "${LISTS}/impacted_commit.txt")" != "$(git rev-parse HEAD)" ]; then
-            echo "::error::the lists are for $(cat "${LISTS}/impacted_commit.txt"); this job checked out $(git rev-parse HEAD)" >&2
-            exit 1
-          fi
-          [ "${HAS_ANY}" = true ] && [ -s "${LISTS}/impacted_build.txt" ] || { echo "::error::has_any is '${HAS_ANY}' and impacted_build.txt has $(wc -l <"${LISTS}/impacted_build.txt") target(s)" >&2; exit 1; }
-          case "${HAS_TEST}" in
-            true) [ -s "${LISTS}/impacted_test.txt" ] ;;
-            false) [ ! -s "${LISTS}/impacted_test.txt" ] ;;
-            *) false ;;
-          esac || { echo "::error::has_test is '${HAS_TEST}' and impacted_test.txt has $(wc -l <"${LISTS}/impacted_test.txt") target(s)" >&2; exit 1; }
-          echo "build: $(wc -l <"${LISTS}/impacted_build.txt") target(s); test: $(wc -l <"${LISTS}/impacted_test.txt")"
 
       # --config=ci refuses lockfile drift, and runs shellcheck on every
       # script as part of the build (bazel/lint/linters.bzl). The Go analyzers

@@ -9,7 +9,7 @@ tested and released together from this repository:
 | --- | --- | --- | --- |
 | **upstream-secretsmanager** | [`upstream-secretsmanager/`](upstream-secretsmanager) | A SPIRE UpstreamAuthority plugin that reads its intermediate CA from Secrets Manager at every mint, with a validated local cache. | static binaries (linux/amd64, linux/arm64) and the image `quay.io/palermo/spire-upstream-secretsmanager` |
 | **kms-intermediate-rotator** | [`rotator/`](rotator) | A Secrets Manager rotation Lambda that issues a name-constrained intermediate CA signed by a KMS key. | `kms-intermediate-rotator_<version>_linux_<arch>.zip` |
-| **intermediate-ca/v1** | [`intermediateca/`](intermediateca) | The secret format the two share: a JSON document, its protobuf schema, and the Go package that reads and writes it. | the Go package `github.com/bpalermo/spire-upstream-secretsmanager/intermediateca` |
+| **intermediate-ca/v1** | [`intermediateca/`](intermediateca) | The secret format the two share: a JSON document, its protobuf schema, and the Go package that reads and writes it. | not released on its own: the specification, and the in-repo implementation the rotator and the plugin use |
 
 ```text
  AWS KMS key (root, never leaves KMS)
@@ -500,6 +500,10 @@ which documents are accepted is a new format, `intermediate-ca/v2` in package
 `intermediateca/v2`, never an edit of v1. `buf breaking` enforces it for the
 schema on every pull request, and the golden files for the rules.
 
+The Go package `intermediateca` is the in-repo implementation the rotator
+and the plugin use. It builds with Bazel: the code generated from the protos
+is not committed.
+
 ```go
 import "github.com/bpalermo/spire-upstream-secretsmanager/intermediateca"
 
@@ -528,12 +532,6 @@ data, err := intermediateca.Encode(&intermediateca.Bundle{
 `DecodeAt(data, t)` checks validity at `t` instead of now. The generated
 message type (`Bundle.Raw`) is in
 `github.com/bpalermo/spire-upstream-secretsmanager/intermediateca/v1`.
-
-The Go packages build with Bazel: the code generated from the protos is not
-committed. A plain `go get` of `intermediateca` therefore lacks
-`intermediateca/v1`, and a user of the Go toolchain alone has to generate it
-(protoc with protoc-gen-go, from `intermediateca/v1/secret.proto` and
-protovalidate's `buf/validate/validate.proto`).
 
 ## Deployment
 
@@ -751,33 +749,35 @@ volumes:
 
 ## Releases
 
-One version for everything (`VERSION`). Pushing a tag `v<VERSION>` publishes,
-on the GitHub Release:
+One version for everything (`VERSION`). Pushing a tag `v<VERSION>` (or
+`v<VERSION>-rc.<n>`) on a commit of main publishes, on the GitHub Release:
 
 - `upstream-secretsmanager_<version>_linux_amd64` and `_linux_arm64`, the
-  plugin binaries, statically linked;
+  plugin binaries, statically linked and reporting the tag with `--version`;
 - `kms-intermediate-rotator_<version>_linux_amd64.zip` and `_linux_arm64.zip`,
   each holding one statically linked executable, `bootstrap`;
 - `checksums.txt` (SHA-256 of all four), signed keyless with cosign
   (`checksums.txt.sigstore.json`);
-- an SBOM, `spire-upstream-secretsmanager_<version>_sbom.spdx.json`, signed
-  the same way;
 
-and pushes the multi-arch plugin image to Quay
-(`quay.io/palermo/spire-upstream-secretsmanager`), signed with cosign (the
-index and each platform's manifest; the signatures are OCI referrers). The release notes list the plugin's
-`plugin_checksum` for each architecture, the image digest and the SHA-256 of
-each Lambda archive. Every binary reports the tag with `--version`. The Go
-package `intermediateca` is versioned by the same tag.
+and pushes the multi-arch plugin image,
+`quay.io/palermo/spire-upstream-secretsmanager`, tagged with the release and
+signed keyless with cosign (the index and each platform's manifest). The
+release notes list the plugin's `plugin_checksum` for each architecture, the
+image digest and the SHA-256 of each Lambda archive.
 
-Verify a download:
+Only the release workflow, run for a `v*` tag, signs. Verify the image (by the
+digest the release notes give):
 
 ```bash
-cosign verify-blob checksums.txt --bundle checksums.txt.sigstore.json \
+cosign verify quay.io/palermo/spire-upstream-secretsmanager@sha256:<digest> \
   --certificate-identity 'https://github.com/bpalermo/spire-upstream-secretsmanager/.github/workflows/release.yml@refs/tags/v<version>' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com
-sha256sum --ignore-missing -c checksums.txt
 ```
+
+and a download the same way, with `cosign verify-blob checksums.txt --bundle
+checksums.txt.sigstore.json` and the same two flags, then `sha256sum
+--ignore-missing -c checksums.txt`. `bazel run //bazel/cosign -- ...` runs
+the cosign this repository pins.
 
 ## Build
 

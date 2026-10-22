@@ -170,7 +170,7 @@ message Subject {
 
 // NameConstraints are an intermediate's X.509 name constraints. Each entry
 // is a host name, optionally with a leading dot. "example.org" and
-// ".example.org" do not mean the same to every verifier: see the README.
+// ".example.org" do not mean the same to every verifier: see docs/rotator.md.
 message NameConstraints {
   // permitted_uri_domains are the hosts URI SANs below the intermediate
   // must be in.

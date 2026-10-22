@@ -366,28 +366,28 @@ func noCertificate(t *testing.T, err error, root string) {
 	}
 }
 
-// The example configuration in the README parses, with a real certificate
+// The example configuration in docs/rotator.md parses, with a real certificate
 // in place of its placeholder.
-func TestREADMEExample(t *testing.T) {
-	readme, err := os.ReadFile("../README.md")
+func TestRotatorDocExample(t *testing.T) {
+	md, err := os.ReadFile("../docs/rotator.md")
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, section, ok := strings.Cut(string(readme), "\n### Rotator configuration\n")
+	_, section, ok := strings.Cut(string(md), "\n## Rotator configuration\n")
 	if !ok {
-		t.Fatal("README.md has no Rotator configuration section")
+		t.Fatal("docs/rotator.md has no Rotator configuration section")
 	}
 	_, block, ok := strings.Cut(section, "```json\n")
 	if !ok {
-		t.Fatal("README.md's Rotator configuration section has no JSON example")
+		t.Fatal("docs/rotator.md's Rotator configuration section has no JSON example")
 	}
 	block, _, _ = strings.Cut(block, "```")
 	var doc map[string]any
 	if err := json.Unmarshal([]byte(block), &doc); err != nil {
-		t.Fatalf("the README example is not JSON: %v", err)
+		t.Fatalf("the docs/rotator.md example is not JSON: %v", err)
 	}
 	if !strings.HasPrefix(doc["root_certificate"].(string), "-----BEGIN CERTIFICATE-----") {
-		t.Fatal("the README example has no root_certificate placeholder")
+		t.Fatal("the docs/rotator.md example has no root_certificate placeholder")
 	}
 	doc["root_certificate"] = rootPEM(t)
 	data, err := json.Marshal(doc)
@@ -396,10 +396,10 @@ func TestREADMEExample(t *testing.T) {
 	}
 	cfg, err := config.Parse(data)
 	if err != nil {
-		t.Fatalf("the README example: %v", err)
+		t.Fatalf("the docs/rotator.md example: %v", err)
 	}
 	if len(cfg.Secrets) != 1 {
-		t.Fatalf("the README example has %d secrets, want 1", len(cfg.Secrets))
+		t.Fatalf("the docs/rotator.md example has %d secrets, want 1", len(cfg.Secrets))
 	}
 }
 

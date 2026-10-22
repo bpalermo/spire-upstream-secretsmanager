@@ -794,7 +794,9 @@ One version for everything (`VERSION`). Pushing a tag `v<VERSION>` (or
   plugin binaries, statically linked and reporting the tag with `--version`;
 - `kms-intermediate-rotator_<version>_linux_amd64.zip` and `_linux_arm64.zip`,
   each holding one statically linked executable, `bootstrap`;
-- `checksums.txt` (SHA-256 of all four), signed keyless with cosign
+- `<file>.spdx.json`, an SPDX SBOM of each of those four (syft, from the Go
+  build information: the modules and the Go version linked in);
+- `checksums.txt` (SHA-256 of all eight), signed keyless with cosign
   (`checksums.txt.sigstore.json`);
 
 and pushes the multi-arch plugin image,

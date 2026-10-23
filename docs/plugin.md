@@ -144,7 +144,13 @@ When SPIRE prepares a new X.509 CA, the plugin:
 4. signs SPIRE's CSR as SPIRE's own `disk` plugin does: the CSR's signature
    must be valid and its only URI SAN must be `spiffe://<trust domain>`; the
    CA is valid from 10 seconds ago until now plus SPIRE's preferred TTL (1
-   hour if SPIRE gives none), but never after the intermediate's `NotAfter`;
+   hour if SPIRE gives none), but never after the intermediate's `NotAfter`.
+   The subject is the CSR's, which is SPIRE's `ca_subject`: with a DNS name
+   constraint on the intermediate, keep its `common_name` inside the
+   constraint or leave it out, because Java and IAM Roles Anywhere check a
+   CA's CN against DNS constraints (the probe of step 2 uses Go, which does
+   not, so it cannot catch this; see
+   [Name constraints and the SPIRE CA's CN](rotator.md#name-constraints-and-the-spire-cas-cn));
 5. returns the chain `[new CA, intermediate, chain...]` and the upstream
    roots: `[root]` for format v1; the whole `bundle_file_arn` bundle with the
    `awssecret` layout, as `awssecret` does (the chain must still verify to a

@@ -128,6 +128,72 @@ which OpenSSL, BoringSSL and the JDK refuse; a SPIRE server never asks for
 another trust domain, so this matters only as a looser bound in Go-based
 verifiers (SPIRE agents, go-spiffe workloads).
 
+## A CA's subject CN and DNS name constraints
+
+Found and bisected on 2026-10-23, outside the harness above: a chain that
+`openssl verify` accepts was refused by IAM Roles Anywhere and by the JDK,
+because **both check a CA certificate's subject CN against the DNS name
+constraints**, not only its subject alternative names.
+
+The failing setup:
+
+- the intermediate has critical name constraints: permitted DNS
+  `.example.org` (leading dot: the hosts below `example.org`, not
+  `example.org` itself), permitted URI `example.org` and excluded URI
+  `.example.org` (exactly the trust domain, see
+  [above](#exampleorg-vs-exampleorg));
+- the SPIRE CA below it has the subject CN `example.org`, the bare trust
+  domain (set with `ca_subject` in SPIRE's `server.conf`), and a URI SAN
+  `spiffe://example.org` but no DNS SAN.
+
+| verifier | result |
+|---|---|
+| IAM Roles Anywhere `CreateSession` (the trust anchor is the root) | `403 AccessDeniedException: Untrusted signing certificate` |
+| Java PKIX (Kafka clients) | `CertPathValidatorException: name constraints check failed` |
+| `openssl verify` | OK |
+
+The CN `example.org`, read as a DNS name, is not below `.example.org`, so a
+verifier that applies DNS constraints to the CN of a certificate without DNS
+SANs rejects the SPIRE CA. OpenSSL applies them to the CN of end-entity
+certificates only (and only when they have no DNS SAN), so it never looks at
+the SPIRE CA's CN. Go's `crypto/x509` applies constraints to SANs alone.
+
+### Bisect
+
+On a throwaway Roles Anywhere trust anchor (a root made for the test). "1
+intermediate" is leaf → intermediate → root; "2 intermediates" is leaf →
+SPIRE-like CA (CN `example.org` unless the row says otherwise) →
+intermediate → root, the production shape.
+
+| intermediate's constraints | 1 intermediate | 2 intermediates |
+|---|---|---|
+| none | OK | OK |
+| DNS + URI | OK | **403** |
+| DNS only | OK | **403** |
+| URI only | OK | OK |
+| DNS + URI, CA CN not the bare domain (`ca.example.org`) | — | OK |
+| DNS + URI, CA without a CN | — | OK |
+| DNS + URI, DNS permitted as `example.org` (no leading dot) | — | OK |
+
+So the trigger is a DNS constraint that does not cover the CA's CN; the URI
+constraints play no part.
+
+### Fixes (any one)
+
+- give the SPIRE CA a CN inside the DNS constraint, for example
+  `ca_subject { common_name = "ca.example.org" }` in `server.conf`;
+- give it no CN (`ca_subject` without `common_name`);
+- permit the DNS domain without the leading dot (`example.org`: the domain
+  and every host below it, for every verifier).
+
+[docs/rotator.md](../docs/rotator.md#name-constraints-and-the-spire-cas-cn)
+has the warning for whoever configures the constraints.
+
+Not a Bazel verifier: Roles Anywhere needs a real AWS account and cannot be
+tested offline, and the Java half would need the chains of `verifiers/chains`
+to grow a SPIRE CA with a domain-like CN (today it is `SPIRE CA`, which is not
+a DNS name and is skipped, which is why the Kafka rows above do not show it).
+
 ## Kubernetes image volume (the plugin's own image)
 
 The plugin image (`//upstream-secretsmanager:image_index`, the binary
@@ -177,4 +243,6 @@ a run is never cached. They need a local Docker daemon and, for the image
 volume test, `kind` on PATH. Networks, containers and the cluster are named
 `susm-*` and removed when their test ends; `run.sh` reports any left behind.
 Rows also land as TSV in `bazel-testlogs/verifiers/<pkg>/<pkg>_test/test.outputs/`.
-AWS IAM Roles Anywhere is out of scope: it needs a real AWS account.
+AWS IAM Roles Anywhere is out of scope here: it needs a real AWS account
+(see [A CA's subject CN and DNS name constraints](#a-cas-subject-cn-and-dns-name-constraints)
+for what was found by hand).

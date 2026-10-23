@@ -271,7 +271,10 @@ func (r *Rotator) configurationTest(log *slog.Logger, why string) error {
 }
 
 // finishSecret moves AWSCURRENT to the token, off the version that has it.
-// Secrets Manager then moves AWSPREVIOUS to that version.
+// Secrets Manager then moves AWSPREVIOUS to that version. AWSPENDING stays
+// on the token, as in AWS's rotation template: AWS says not to remove it
+// with a separate call, and RotateSecret treats AWSPENDING on the
+// AWSCURRENT version as a finished rotation.
 func (r *Rotator) finishSecret(ctx context.Context, t *target, log *slog.Logger) error {
 	in := &secretsmanager.UpdateSecretVersionStageInput{
 		SecretId:        aws.String(t.arn),

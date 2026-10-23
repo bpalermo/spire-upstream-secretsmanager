@@ -343,8 +343,15 @@ func TestFinishSecret(t *testing.T) {
 	if err := e.step(rotation.StepFinish); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.sm.labels(token); !slices.Contains(got, "AWSCURRENT") {
-		t.Fatalf("token labels %v", got)
+	// AWSPENDING stays on the new version, next to AWSCURRENT: the AWS
+	// rotation contract says not to remove it with a separate call, and
+	// RotateSecret treats AWSPENDING on the AWSCURRENT version as a
+	// finished rotation (docs/rotator.md, "Stages after a rotation").
+	if got := e.sm.labels(token); !slices.Contains(got, "AWSCURRENT") || !slices.Contains(got, "AWSPENDING") {
+		t.Fatalf("token labels %v, want AWSCURRENT and AWSPENDING", got)
+	}
+	if got := aws.ToString(e.sm.updates[0].VersionStage); got != "AWSCURRENT" {
+		t.Fatalf("finishSecret moved %s, want only AWSCURRENT", got)
 	}
 	if got := e.sm.labels(oldVersion); !slices.Equal(got, []string{"AWSPREVIOUS"}) {
 		t.Fatalf("old current labels %v, want [AWSPREVIOUS]", got)

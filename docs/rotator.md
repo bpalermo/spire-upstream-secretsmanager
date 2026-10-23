@@ -57,7 +57,39 @@ does nothing; if it is not `AWSPENDING` the step fails.
    always tested in full.
 4. **finishSecret**: moves `AWSCURRENT` to the token with
    `UpdateSecretVersionStage`, removing it from the version that had it
-   (Secrets Manager then labels that one `AWSPREVIOUS`).
+   (Secrets Manager then labels that one `AWSPREVIOUS`). It leaves
+   `AWSPENDING` where it is (see
+   [Stages after a rotation](#stages-after-a-rotation)).
+
+### Stages after a rotation
+
+After a successful rotation `describe-secret` shows the new version with
+`[AWSCURRENT, AWSPENDING]` and the one before it with `AWSPREVIOUS`. That is
+the expected end state, not a stuck rotation:
+
+- The AWS contract for `finishSecret` is to move `AWSCURRENT` and nothing
+  else, and it warns: "Don't remove `AWSPENDING` before this point, and don't
+  remove it by using a separate API call, because that can indicate to
+  Secrets Manager that the rotation did not complete successfully"
+  ([Lambda rotation functions](https://docs.aws.amazon.com/secretsmanager/latest/userguide/rotate-secrets_lambda-functions.html)).
+  AWS's generic template's `finish_secret` makes exactly one
+  `update_secret_version_stage` call, for `AWSCURRENT`
+  ([SecretsManagerRotationTemplate](https://github.com/aws-samples/aws-secrets-manager-rotation-lambdas/blob/master/SecretsManagerRotationTemplate/lambda_function.py)).
+- "When rotation is successful, the `AWSPENDING` staging label might be
+  attached to the same version as the `AWSCURRENT` version, or it might not be
+  attached to any version. If the `AWSPENDING` staging label is present but
+  not attached to the same version as `AWSCURRENT`, then any later invocation
+  of `RotateSecret` assumes that a previous rotation request is still in
+  progress and returns an error"
+  ([RotateSecret](https://docs.aws.amazon.com/secretsmanager/latest/apireference/API_RotateSecret.html)).
+  So `AWSPENDING` on the `AWSCURRENT` version means done; `AWSPENDING` on
+  any **other** version is the case that blocks the next rotation (see
+  [Recovering a stuck rotation](#recovering-a-stuck-rotation)).
+- The next rotation does not depend on it: Secrets Manager moves
+  `AWSPENDING` to the new token's version before calling createSecret, whose
+  retry check reads that token's version (`VersionId` = token, `VersionStage`
+  = `AWSPENDING`), as the template does. The old version's leftover label
+  plays no part.
 
 At cold start, before serving anything, the function loads its configuration
 and calls KMS `GetPublicKey`: if the key's public key is not the configured
@@ -107,7 +139,34 @@ for instance) in every stack, pair the two:
 ```
 
 For DNS constraints all of them read `example.org` as the domain and its
-subdomains. [verifiers/RESULTS.md](../verifiers/RESULTS.md) records what Envoy,
+subdomains.
+
+### Name constraints and the SPIRE CA's CN
+
+> [!WARNING]
+> With a DNS constraint, the SPIRE CA's subject CN must be inside it, or
+> absent. IAM Roles Anywhere and the JDK (Kafka clients, any Java PKIX
+> verifier) check a CA certificate's subject CN against the DNS name
+> constraints when it has no DNS SAN, and the SPIRE CA has none. With
+> `permitted_dns_domains: [".example.org"]` and a SPIRE `ca_subject` whose
+> `common_name` is the bare trust domain `example.org`, Roles Anywhere's
+> `CreateSession` fails with `403 AccessDeniedException: Untrusted signing
+> certificate` and Java with `CertPathValidatorException: name constraints
+> check failed`, while `openssl verify` and Go accept the chain.
+>
+> Do one of:
+>
+> - set SPIRE's `ca_subject` `common_name` to a name inside the constraint
+>   (`ca.example.org`), or leave `common_name` out;
+> - permit the DNS domain without the leading dot (`example.org`).
+>
+> The bisect is in [verifiers/RESULTS.md](../verifiers/RESULTS.md#a-cas-subject-cn-and-dns-name-constraints).
+
+The rotator does not check this: SPIRE's CA subject is set in the SPIRE
+server's configuration, which the rotator never sees, and a CN outside a DNS
+constraint is valid for RFC 5280 and for OpenSSL, so refusing such
+constraints would refuse working setups. It is a pairing of two
+configurations, documented here and in [docs/plugin.md](plugin.md). [verifiers/RESULTS.md](../verifiers/RESULTS.md) records what Envoy,
 MySQL, Kafka and Go actually enforce.
 
 ### Path length and the root
